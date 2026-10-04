@@ -52,6 +52,7 @@ if(FLEETLINK_BUILD_TESTS)
     enable_testing()
     add_executable(fleetlink_tests
         tests/main.cpp
+        tests/test_machine.cpp
         tests/test_messages.cpp
         tests/test_transport.cpp
         tests/test_protocol.cpp
