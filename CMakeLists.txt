@@ -19,6 +19,7 @@ add_subdirectory(third_party)
 # --- ядро ---------------------------------------------------------------------
 add_library(fleetlink_core SHARED
     src/machine.cpp
+    src/messages.cpp
     src/transport.cpp
     src/logger.cpp
     src/world.cpp
@@ -49,6 +50,7 @@ if(FLEETLINK_BUILD_TESTS)
     enable_testing()
     add_executable(fleetlink_tests
         tests/main.cpp
+        tests/test_messages.cpp
         tests/test_transport.cpp
         tests/test_protocol.cpp
         tests/test_world.cpp
