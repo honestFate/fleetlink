@@ -384,3 +384,105 @@ TEST_CASE("all registration and processing permutations preserve a four-machine 
         CHECK(runContended(order) == expected);
     } while (std::next_permutation(order.begin(), order.end()));
 }
+
+TEST_CASE("request retries retain priority and collected replies until permission")
+{
+    CHECK_THROWS_AS((AccessProtocol(1, {1, 2}, 0)), std::invalid_argument);
+    AccessProtocol node(1, {1, 2, 3}, 10);
+    const auto attempt = node.request(loading, 5);
+    const auto original = node.takeOutgoing().front();
+    node.onMessage(replyFrom(2, attempt), 6);
+    node.retry(14);
+    CHECK(node.takeOutgoing().empty());
+    node.retry(15);
+    const auto outgoing = node.takeOutgoing();
+    REQUIRE(outgoing.size() == 1);
+    const auto& repeat = outgoing.front();
+    CHECK(repeat.header.id.sequence > original.header.id.sequence);
+    CHECK(repeat.header.clock > original.header.clock);
+    CHECK(repeat.header.sent_tick == 15);
+    CHECK(std::get<Request>(repeat.payload).id == attempt);
+    CHECK(requestKey(std::get<Request>(repeat.payload)) ==
+          requestKey(std::get<Request>(original.payload)));
+    node.retry(15);
+    CHECK(node.takeOutgoing().empty());
+    node.onMessage(replyFrom(3, attempt), 16);
+    CHECK(node.hasPermission(loading));
+    node.retry(100);
+    CHECK(node.takeOutgoing().empty());
+}
+
+TEST_CASE("retries recover both a lost request and a lost immediate reply")
+{
+    AccessProtocol requester(1, {1, 2}, 10);
+    AccessProtocol responder(2, {1, 2}, 10);
+    const auto attempt = requester.request(loading, 0);
+    requester.takeOutgoing();
+    requester.retry(10);
+    responder.onMessage(requester.takeOutgoing().front(), 11);
+    const auto lost = responder.takeOutgoing();
+    REQUIRE(lost.size() == 1);
+    responder.request(loading, 11);
+    const auto competing = responder.takeOutgoing();
+    requester.onMessage(competing.front(), 12);
+    CHECK(requester.takeOutgoing().empty());
+    requester.retry(20);
+    responder.onMessage(requester.takeOutgoing().front(), 21);
+    const auto repeated = responder.takeOutgoing();
+    REQUIRE(repeated.size() == 1);
+    CHECK(std::get<Reply>(repeated.front().payload).request == attempt);
+    requester.onMessage(repeated.front(), 22);
+    CHECK(requester.hasPermission(loading));
+    CHECK(responder.isWaiting(loading));
+    requester.release(loading, 23);
+    for (const auto& message : requester.takeOutgoing()) {
+        responder.onMessage(message, 24);
+    }
+    CHECK(responder.hasPermission(loading));
+}
+
+TEST_CASE("a lost deferred reply is recovered after release without receiving RELEASE")
+{
+    AccessProtocol holder(1, {1, 2}, 10);
+    AccessProtocol waiter(2, {1, 2}, 10);
+    holder.request(loading, 0);
+    waiter.onMessage(holder.takeOutgoing().front(), 1);
+    holder.onMessage(waiter.takeOutgoing().front(), 2);
+    REQUIRE(holder.hasPermission(loading));
+    waiter.request(loading, 2);
+    holder.onMessage(waiter.takeOutgoing().front(), 3);
+    CHECK(holder.takeOutgoing().empty());
+    holder.release(loading, 4);
+    holder.takeOutgoing();
+    waiter.retry(12);
+    holder.onMessage(waiter.takeOutgoing().front(), 13);
+    const auto recovered = holder.takeOutgoing();
+    REQUIRE(recovered.size() == 1);
+    waiter.onMessage(recovered.front(), 14);
+    CHECK(waiter.hasPermission(loading));
+    CHECK_FALSE(holder.hasPermission(loading));
+}
+
+TEST_CASE("old requests cannot replace newer deferred attempts or resurrect released attempts")
+{
+    AccessProtocol node(1, {1, 2});
+    const auto own = node.request(loading, 0);
+    node.takeOutgoing();
+    node.onMessage(replyFrom(2, own), 1);
+    const auto current = requestFrom(2, 10, 30);
+    node.onMessage(current, 2);
+    node.onMessage(requestFrom(2, 5, 20), 3);
+    node.release(loading, 4);
+    const auto outgoing = node.takeOutgoing();
+    REQUIRE(outgoing.size() == 2);
+    CHECK(std::get<Reply>(outgoing.back().payload).request ==
+          std::get<Request>(current.payload).id);
+    node.onMessage({{{2, 11}, std::nullopt, 5, 40}, Release{{loading, 2, 10}}}, 6);
+    node.onMessage(current, 7);
+    CHECK(node.takeOutgoing().empty());
+    node.onMessage({{{2, 21}, std::nullopt, 8, 50}, Release{{unloading, 2, 20}}}, 9);
+    node.onMessage(requestFrom(2, 20, 45, unloading), 10);
+    CHECK(node.takeOutgoing().empty());
+    node.onMessage(requestFrom(2, 30, 60), 11);
+    REQUIRE(node.takeOutgoing().size() == 1);
+}

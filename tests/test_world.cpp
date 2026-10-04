@@ -342,3 +342,126 @@ TEST_CASE("full asynchronous traces retain message identities and are reproducib
     CHECK(state_changes > 0);
     CHECK(releases > 0);
 }
+
+TEST_CASE("S2 preserves physical capacity and every machine progresses across fixed seeds")
+{
+    for (const std::uint64_t seed : {0, 1, 7, 42, 12345}) {
+        INFO("seed " << seed);
+        World world({0, 1, 2, 3, 4, 5}, {}, nullptr, {seed, 0.2, 1, 10, 0.05});
+        dispatchAll(world);
+        world.step(5000);
+        std::map<ResourceId, std::set<MachineId>> inside;
+        std::map<MachineId, Tick> waiting;
+        for (const auto& event : world.events()) {
+            auto& occupants = inside[event.resource];
+            if (event.kind == ZoneEventKind::REQUEST) {
+                CHECK(waiting.emplace(event.machine, event.tick).second);
+            } else if (event.kind == ZoneEventKind::ENTER) {
+                REQUIRE(waiting.count(event.machine) == 1);
+                // An empirical regression budget for these finite scenarios, not a loss bound
+                CHECK(event.tick - waiting.at(event.machine) < 1500);
+                waiting.erase(event.machine);
+                CHECK(occupants.empty());
+                CHECK(occupants.insert(event.machine).second);
+            } else {
+                CHECK(occupants.erase(event.machine) == 1);
+            }
+            CHECK(occupants.size() <= 1);
+        }
+        for (const auto& [id, requested] : waiting) {
+            INFO("still waiting " << id);
+            CHECK(world.currentTick() - requested < 1500);
+        }
+        for (const auto& machine : world.snapshot()) {
+            INFO("machine " << machine.id);
+            CHECK(machine.completed_loads > 0);
+            CHECK(machine.completed_unloads > 0);
+            for (const auto resource : {ResourceId::LOADING_BUFFER, ResourceId::UNLOADING_BUFFER}) {
+                CHECK((inside[resource].count(machine.id) != 0) ==
+                      (machine.occupied_buffer == resource));
+            }
+        }
+        CHECK(world.channelCounters().lost > 0);
+        CHECK(world.channelCounters().duplicates > 0);
+    }
+}
+
+TEST_CASE("dirty traces explain losses duplication and recovery independently of roster order")
+{
+    std::ostringstream first_output;
+    std::ostringstream second_output;
+    Logger first_logger(first_output, LogLevel::TRACE);
+    Logger second_logger(second_output, LogLevel::TRACE);
+    const ChannelConfig config{42, 0.2, 1, 10, 0.05};
+    World first({0, 1, 2, 3, 4, 5}, {}, &first_logger, config);
+    World second({5, 3, 1, 4, 0, 2}, {}, &second_logger, config);
+    dispatchAll(first);
+    dispatchAll(second);
+    first.step(500);
+    for (unsigned tick = 0; tick < 500; ++tick) {
+        second.step();
+    }
+    first_logger.close();
+    second_logger.close();
+    CHECK(first_output.str() == second_output.str());
+    checkSnapshots(first, second);
+    CHECK(eventKeys(first) == eventKeys(second));
+
+    std::map<std::string, std::uint64_t> events;
+    std::istringstream input(first_output.str());
+    Tick previous = 0;
+    for (std::string line; std::getline(input, line);) {
+        const auto row = nlohmann::json::parse(line);
+        const auto event = row.at("ev").get<std::string>();
+        ++events[event];
+        const auto tick = row.at("tick").get<Tick>();
+        CHECK(tick >= previous);
+        previous = tick;
+        if (event == "msg_drop" || event == "msg_duplicate") {
+            CHECK(row.contains("from"));
+            CHECK(row.contains("to"));
+            CHECK(row.contains("seq"));
+            CHECK(row.contains("sent_tick"));
+        }
+        if (event == "request_retry") {
+            CHECK(row.at("seq") != row.at("request_seq"));
+        }
+    }
+    const auto& counters = first.channelCounters();
+    CHECK(events["msg_drop"] == counters.lost);
+    CHECK(events["msg_duplicate"] == counters.duplicates);
+    CHECK(events["msg_deliver"] == counters.delivered);
+    CHECK(events["msg_schedule"] == counters.sent - counters.lost + counters.duplicates);
+    CHECK(events["request_retry"] > 0);
+    CHECK(events["request_repeat"] > 0);
+    CHECK(events["reply_ignored"] > 0);
+    CHECK(events["mission_retry"] > 0);
+}
+
+TEST_CASE("a completely lost mission is retried but cannot start a machine out of band")
+{
+    std::ostringstream output;
+    Logger logger(output, LogLevel::TRACE);
+    World world({0, 1, 2, 3}, {}, &logger, {42, 1, 1, 10, 0});
+    world.dispatch(0, MissionTarget::LOAD);
+    world.step(150);
+    logger.close();
+    CHECK(world.events().empty());
+    CHECK(world.channelCounters().sent == 4);
+    CHECK(world.channelCounters().lost == 4);
+    CHECK(world.channelCounters().delivered == 0);
+    for (const auto& machine : world.snapshot()) {
+        CHECK(machine.state == MachineState::IDLE);
+    }
+    std::istringstream input(output.str());
+    std::vector<Tick> retries;
+    for (std::string line; std::getline(input, line);) {
+        const auto row = nlohmann::json::parse(line);
+        if (row.at("ev") == "mission_retry") {
+            CHECK(row.at("seq") == 1);
+            CHECK(row.at("mission_seq") == 1);
+            retries.push_back(row.at("tick").get<Tick>());
+        }
+    }
+    CHECK(retries == std::vector<Tick>{50, 100, 150});
+}

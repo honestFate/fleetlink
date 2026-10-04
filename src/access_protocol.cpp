@@ -16,9 +16,13 @@ bool isBuffer(ResourceId resource)
 
 } // namespace
 
-AccessProtocol::AccessProtocol(MachineId id, std::vector<MachineId> members)
-    : id_(id), members_(std::move(members))
+AccessProtocol::AccessProtocol(MachineId id, std::vector<MachineId> members, Tick retry_interval,
+                               Logger* logger)
+    : id_(id), members_(std::move(members)), retry_interval_(retry_interval), logger_(logger)
 {
+    if (retry_interval_ == 0) {
+        throw std::invalid_argument("Retry interval must be positive");
+    }
     std::sort(members_.begin(), members_.end());
     if (std::adjacent_find(members_.begin(), members_.end()) != members_.end()) {
         throw std::invalid_argument("Duplicate machine id in protocol membership");
@@ -41,6 +45,7 @@ RequestId AccessProtocol::request(ResourceId resource, Tick tick)
     const Request attempt{{resource, id_, header.id.sequence}, header.clock};
     outgoing_.push_back({header, attempt});
     request_ = attempt;
+    last_request_tick_ = tick;
     replies_.clear();
     granted_ = members_.size() == 1;
     return attempt.id;
@@ -53,10 +58,12 @@ void AccessProtocol::release(ResourceId resource, Tick tick)
     }
 
     outgoing_.push_back({makeHeader(tick), Release{request_->id}});
-    for (const auto& [peer, attempt] : deferred_) {
-        outgoing_.push_back({makeHeader(tick, peer), Reply{attempt}});
+    for (auto& [peer, attempt] : peer_requests_) {
+        if (!attempt.replied && !attempt.released) {
+            outgoing_.push_back({makeHeader(tick, peer), Reply{attempt.id}});
+            attempt.replied = true;
+        }
     }
-    deferred_.clear();
     replies_.clear();
     request_.reset();
     granted_ = false;
@@ -89,11 +96,31 @@ void AccessProtocol::onMessage(const Message& message, Tick tick)
 
     clock_ = nextLamportTime(clock_, message.header.clock);
     if (request) {
-        onRequest(*request, tick);
+        onRequest(message, tick);
     } else if (reply) {
-        onReply(static_cast<MachineId>(sender), *reply);
+        if (!onReply(static_cast<MachineId>(sender), *reply)) {
+            logMessage("reply_ignored", message, tick);
+        }
+    } else if (release) {
+        onRelease(*release);
     }
     // RELEASE is informational and never substitutes for a matching REPLY
+}
+
+void AccessProtocol::retry(Tick tick)
+{
+    if (!request_ || granted_ || tick < last_request_tick_ ||
+        tick - last_request_tick_ < retry_interval_) {
+        return;
+    }
+    outgoing_.push_back({makeHeader(tick), *request_});
+    last_request_tick_ = tick;
+    logMessage("request_retry", outgoing_.back(), tick);
+}
+
+void AccessProtocol::acknowledge(MessageId message, Tick tick)
+{
+    outgoing_.push_back({makeHeader(tick, message.sender), Ack{message}});
 }
 
 bool AccessProtocol::isWaiting(ResourceId resource) const noexcept
@@ -124,23 +151,69 @@ MessageHeader AccessProtocol::makeHeader(Tick tick, std::optional<NodeId> recipi
     return {{id_, sequence_}, recipient, tick, clock_};
 }
 
-void AccessProtocol::onRequest(const Request& request, Tick tick)
+void AccessProtocol::onRequest(const Message& message, Tick tick)
 {
+    const auto& request = std::get<Request>(message.payload);
+    const auto peer = request.id.requester;
+    const auto known = peer_requests_.find(peer);
+    if (known != peer_requests_.end() && request.id.sequence <= known->second.id.sequence) {
+        const auto& previous = known->second;
+        if (!(request.id == previous.id) || previous.released ||
+            request.timestamp != previous.timestamp) {
+            logMessage("request_ignored", message, tick);
+            return;
+        }
+        // Never retract a reply already issued for this attempt, even after our state changes
+        logMessage("request_repeat", message, tick);
+        if (previous.replied) {
+            outgoing_.push_back({makeHeader(tick, peer), Reply{request.id}});
+        }
+        return;
+    }
+    auto& remembered =
+        peer_requests_.insert_or_assign(peer, PeerRequest{request.id, request.timestamp})
+            .first->second;
     const bool same_resource = request_ && request_->id.resource == request.id.resource;
     if (same_resource && (granted_ || requestKey(*request_) < requestKey(request))) {
-        deferred_.insert_or_assign(request.id.requester, request.id);
         return;
     }
-    outgoing_.push_back({makeHeader(tick, request.id.requester), Reply{request.id}});
+    outgoing_.push_back({makeHeader(tick, peer), Reply{request.id}});
+    remembered.replied = true;
 }
 
-void AccessProtocol::onReply(MachineId sender, const Reply& reply)
+bool AccessProtocol::onReply(MachineId sender, const Reply& reply)
 {
     if (!request_ || granted_ || !(reply.request == request_->id)) {
-        return;
+        return false;
     }
-    replies_.insert(sender);
+    const bool accepted = replies_.insert(sender).second;
     granted_ = replies_.size() == members_.size() - 1;
+    return accepted;
+}
+
+void AccessProtocol::onRelease(const Release& release)
+{
+    const auto peer = release.request.requester;
+    const auto known = peer_requests_.find(peer);
+    if (known == peer_requests_.end() || release.request.sequence >= known->second.id.sequence) {
+        peer_requests_.insert_or_assign(peer, PeerRequest{release.request, 0, false, true});
+    }
+}
+
+void AccessProtocol::logMessage(const char* event, const Message& message, Tick tick)
+{
+    if (logger_ && logger_->enabled(LogLevel::DEBUG)) {
+        const auto* request = std::get_if<Request>(&message.payload);
+        const auto attempt = request ? request->id : std::get<Reply>(message.payload).request;
+        logger_->log({tick,
+                      nodeName(id_),
+                      LogLevel::DEBUG,
+                      event,
+                      {{"from", nodeName(message.header.id.sender)},
+                       {"seq", message.header.id.sequence},
+                       {"requester", nodeName(attempt.requester)},
+                       {"request_seq", attempt.sequence}}});
+    }
 }
 
 } // namespace fleetlink

@@ -30,11 +30,6 @@ std::vector<NodeId> transportNodes(const std::vector<MachineId>& members)
     return nodes;
 }
 
-std::string nodeName(NodeId node)
-{
-    return node == ARM_NODE_ID ? "ARM" : "M" + std::to_string(node);
-}
-
 std::string resourceName(ResourceId resource)
 {
     constexpr std::array<const char*, 4> names{"LOADING_BUFFER", "UNLOADING_BUFFER",
@@ -51,12 +46,14 @@ std::string stateName(MachineState state)
 
 } // namespace
 
-World::World(std::vector<MachineId> members, MachineConfig config, Logger* logger)
+World::World(std::vector<MachineId> members, MachineConfig config, Logger* logger,
+             ChannelConfig channel)
     : logger_(logger), members_(validatedMembers(std::move(members))),
-      transport_(transportNodes(members_))
+      transport_(transportNodes(members_), channel, logger), retry_interval_(config.retry_interval)
 {
     for (const auto id : members_) {
-        machines_.emplace(id, MachineRecord{Machine(id, members_, config)});
+        machines_.emplace(
+            id, MachineRecord{Machine(id, members_, config, MachineClass::HAULER, logger)});
     }
 }
 
@@ -73,7 +70,9 @@ void World::dispatch(MachineId id, MissionTarget target)
     }
     const auto sequence = arm_sequence_ + 1;
     const auto clock = nextLamportTime(arm_clock_);
-    send({{{ARM_NODE_ID, sequence}, id, tick_, clock}, Mission{sequence, target}});
+    const Message mission{{{ARM_NODE_ID, sequence}, id, tick_, clock}, Mission{sequence, target}};
+    send(mission);
+    pending_missions_.insert_or_assign(id, mission);
     arm_sequence_ = sequence;
     arm_clock_ = clock;
 }
@@ -87,7 +86,17 @@ void World::step(Tick ticks)
         transport_.advanceTo(++tick_);
         for (const auto& message : receive(ARM_NODE_ID)) {
             arm_clock_ = nextLamportTime(arm_clock_, message.header.clock);
+            const auto* ack = std::get_if<Ack>(&message.payload);
+            if (ack && message.header.id.sender <= std::numeric_limits<MachineId>::max()) {
+                const auto pending =
+                    pending_missions_.find(static_cast<MachineId>(message.header.id.sender));
+                if (pending != pending_missions_.end() &&
+                    ack->message == pending->second.header.id) {
+                    pending_missions_.erase(pending);
+                }
+            }
         }
+        retryMissions();
 
         std::vector<Message> outgoing;
         for (auto& [id, record] : machines_) {
@@ -110,7 +119,9 @@ void World::step(Tick ticks)
             }
             for (const auto& message : messages) {
                 if (const auto* request = std::get_if<Request>(&message.payload)) {
-                    recordZone(id, ZoneEventKind::REQUEST, request->id.resource);
+                    if (request->id.sequence == message.header.id.sequence) {
+                        recordZone(id, ZoneEventKind::REQUEST, request->id.resource);
+                    }
                 }
             }
             if (logger_ && logger_->enabled(LogLevel::DEBUG) &&
@@ -223,6 +234,10 @@ void World::logMessage(const Message& message, const char* event, NodeId node,
         record.fields.emplace(
             "target", std::string(mission->first_target == MissionTarget::LOAD ? "load" : "dump"));
     }
+    if (const auto* ack = std::get_if<Ack>(&message.payload)) {
+        record.fields.emplace("ack_from", nodeName(ack->message.sender));
+        record.fields.emplace("ack_seq", ack->message.sequence);
+    }
     logger_->log(std::move(record));
 }
 
@@ -239,6 +254,21 @@ std::vector<Message> World::receive(NodeId recipient)
         logMessage(message, "msg_receive", recipient, recipient);
     }
     return incoming;
+}
+
+void World::retryMissions()
+{
+    for (auto& [id, message] : pending_missions_) {
+        if (tick_ - message.header.sent_tick < retry_interval_) {
+            continue;
+        }
+        // A MISSION keeps its identity so a delayed ACK can finish any retransmission
+        message.header.sent_tick = tick_;
+        arm_clock_ = nextLamportTime(arm_clock_);
+        message.header.clock = arm_clock_;
+        logMessage(message, "mission_retry", ARM_NODE_ID, id);
+        send(message);
+    }
 }
 
 } // namespace fleetlink

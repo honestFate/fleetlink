@@ -14,6 +14,7 @@ struct MachineConfig {
     int unloading_rate = 20;        // Percentage points per tick
     std::int64_t initial_position = 0;
     int initial_load = 0;
+    Tick retry_interval = 50;
 };
 
 class Machine {
@@ -21,7 +22,7 @@ public:
     // A standalone machine with a one-member protocol
     explicit Machine(MachineId id, MachineClass machine_class = MachineClass::HAULER);
     Machine(MachineId id, std::vector<MachineId> members, MachineConfig config = {},
-            MachineClass machine_class = MachineClass::HAULER);
+            MachineClass machine_class = MachineClass::HAULER, Logger* logger = nullptr);
 
     // Process one tick and return messages for the simulation's send phase
     // Tick values must be consecutive after the first call
@@ -38,7 +39,7 @@ public:
 
 private:
     ResourceId targetBuffer() const noexcept;
-    void onMission(const Message& message);
+    void onMission(const Message& message, Tick now);
     void move(Tick now);
     void service(Tick now);
 

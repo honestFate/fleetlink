@@ -14,6 +14,8 @@
 
 namespace fleetlink {
 
+std::string nodeName(NodeId node);
+
 enum class LogLevel {
     TRACE,
     DEBUG,

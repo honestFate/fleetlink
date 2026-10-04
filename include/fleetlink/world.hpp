@@ -38,7 +38,7 @@ class World {
 public:
     // An optional logger must outlive the world and its calls
     explicit World(std::vector<MachineId> members = {0, 1, 2, 3, 4, 5}, MachineConfig config = {},
-                   Logger* logger = nullptr);
+                   Logger* logger = nullptr, ChannelConfig channel = {});
 
     // Send an addressed MISSION through the same transport as peer messages
     void dispatch(MachineId id, MissionTarget target);
@@ -48,6 +48,7 @@ public:
     // Actual model state, independent of ARM telemetry
     std::vector<MachineSnapshot> snapshot() const;
     const std::vector<ZoneEvent>& events() const noexcept { return events_; }
+    const ChannelCounters& channelCounters() const noexcept { return transport_.counters(); }
 
 private:
     struct MachineRecord {
@@ -62,6 +63,7 @@ private:
                     std::optional<NodeId> recipient);
     void send(const Message& message);
     std::vector<Message> receive(NodeId recipient);
+    void retryMissions();
 
     Logger* logger_;
     std::vector<MachineId> members_;
@@ -70,6 +72,8 @@ private:
     Tick tick_ = 0;
     SequenceNumber arm_sequence_ = 0;
     LamportTime arm_clock_ = 0;
+    Tick retry_interval_;
+    std::map<MachineId, Message> pending_missions_;
     std::vector<ZoneEvent> events_;
 };
 

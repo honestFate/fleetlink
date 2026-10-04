@@ -39,6 +39,22 @@ std::vector<NodeId> transportNodes(const std::vector<MachineId>& members)
     return nodes;
 }
 
+// Cycle tests inspect resource messages separately from mission acknowledgements
+std::vector<Message> withoutAcks(std::vector<Message> messages)
+{
+    messages.erase(std::remove_if(messages.begin(), messages.end(),
+                                  [](const auto& message) {
+                                      return messageKind(message) == MessageKind::ACK;
+                                  }),
+                   messages.end());
+    return messages;
+}
+
+std::vector<Message> tickMachine(Machine& machine, Tick tick, const std::vector<Message>& incoming)
+{
+    return withoutAcks(machine.tick(tick, incoming));
+}
+
 // A small test driver that exchanges all messages through the real transport
 class MachineFleet {
 public:
@@ -81,7 +97,7 @@ public:
             channel_.send(message);
         }
         channel_.receive(ARM_NODE_ID);
-        return outgoing;
+        return withoutAcks(std::move(outgoing));
     }
 
 private:
@@ -98,7 +114,7 @@ TEST_CASE("an idle machine stays outside the buffers and still answers peer requ
 {
     Machine machine(1, std::vector<MachineId>{1, 2});
     const auto incoming = requestFrom(2, loading);
-    const auto outgoing = machine.tick(3, {incoming});
+    const auto outgoing = tickMachine(machine, 3, {incoming});
     REQUIRE(outgoing.size() == 1);
     REQUIRE(messageKind(outgoing.front()) == MessageKind::REPLY);
     CHECK(std::get<Reply>(outgoing.front().payload).request ==
@@ -107,7 +123,7 @@ TEST_CASE("an idle machine stays outside the buffers and still answers peer requ
     CHECK(machine.position() == 0);
     CHECK(machine.load() == 0);
     CHECK_FALSE(machine.occupiedBuffer().has_value());
-    CHECK(machine.tick(4, {}).empty());
+    CHECK(tickMachine(machine, 4, {}).empty());
 }
 
 TEST_CASE("movement clamps at either buffer boundary and requests only upon arrival")
@@ -132,8 +148,9 @@ TEST_CASE("movement clamps at either buffer boundary and requests only upon arri
 
     Machine machine(1, std::vector<MachineId>{1}, config);
     for (Tick tick = 1; tick <= 3; ++tick) {
-        const auto outgoing = machine.tick(
-            tick, tick == 1 ? std::vector<Message>{missionFor(1, target)} : std::vector<Message>{});
+        const auto outgoing = tickMachine(machine, tick,
+                                          tick == 1 ? std::vector<Message>{missionFor(1, target)}
+                                                    : std::vector<Message>{});
         CHECK(machine.position() == expected.at(tick - 1));
         CHECK(machine.load() == config.initial_load);
         CHECK_FALSE(machine.occupiedBuffer().has_value());
@@ -147,7 +164,7 @@ TEST_CASE("movement clamps at either buffer boundary and requests only upon arri
             CHECK(std::get<Request>(outgoing.front().payload).id.resource == resource);
         }
     }
-    CHECK(machine.tick(4, {}).empty());
+    CHECK(tickMachine(machine, 4, {}).empty());
     CHECK(machine.state() == MachineState::IN_ZONE);
     CHECK(machine.occupiedBuffer() == resource);
     CHECK(machine.load() == config.initial_load);
@@ -156,22 +173,22 @@ TEST_CASE("movement clamps at either buffer boundary and requests only upon arri
 TEST_CASE("waiting at a buffer does not occupy it or start service before all replies")
 {
     Machine machine(1, std::vector<MachineId>{1, 2, 3});
-    const auto outgoing = machine.tick(1, {missionFor(1, MissionTarget::LOAD)});
+    const auto outgoing = tickMachine(machine, 1, {missionFor(1, MissionTarget::LOAD)});
     REQUIRE(outgoing.size() == 1);
     const auto attempt = std::get<Request>(outgoing.front().payload).id;
-    machine.tick(2, {replyFrom(2, attempt)});
+    tickMachine(machine, 2, {replyFrom(2, attempt)});
     CHECK(machine.state() == MachineState::WAIT_PERMIT);
     CHECK_FALSE(machine.occupiedBuffer().has_value());
     CHECK(machine.load() == 0);
     CHECK(machine.position() == 0);
-    CHECK(machine.tick(3, {}).empty());
+    CHECK(tickMachine(machine, 3, {}).empty());
     CHECK(machine.state() == MachineState::WAIT_PERMIT);
 
-    machine.tick(4, {replyFrom(3, attempt)});
+    tickMachine(machine, 4, {replyFrom(3, attempt)});
     CHECK(machine.state() == MachineState::IN_ZONE);
     CHECK(machine.occupiedBuffer() == loading);
     CHECK(machine.load() == 0);
-    machine.tick(5, {});
+    tickMachine(machine, 5, {});
     CHECK(machine.state() == MachineState::LOADING);
     CHECK(machine.occupiedBuffer() == loading);
     CHECK(machine.load() == 20);
@@ -233,24 +250,24 @@ TEST_CASE("service processes requests and sends deferred replies after physicall
     MachineConfig config;
     config.loading_rate = 40;
     Machine machine(1, std::vector<MachineId>{1, 2, 3}, config);
-    const auto first = machine.tick(1, {missionFor(1, MissionTarget::LOAD)});
+    const auto first = tickMachine(machine, 1, {missionFor(1, MissionTarget::LOAD)});
     REQUIRE(first.size() == 1);
     const auto attempt = std::get<Request>(first.front().payload).id;
-    machine.tick(2, {replyFrom(2, attempt), replyFrom(3, attempt)});
+    tickMachine(machine, 2, {replyFrom(2, attempt), replyFrom(3, attempt)});
     REQUIRE(machine.occupiedBuffer() == loading);
 
     const auto waiting = requestFrom(2, loading);
     const auto other_buffer = requestFrom(3, unloading);
-    const auto replies = machine.tick(3, {waiting, other_buffer});
+    const auto replies = tickMachine(machine, 3, {waiting, other_buffer});
     REQUIRE(replies.size() == 1);
     REQUIRE(messageKind(replies.front()) == MessageKind::REPLY);
     CHECK(replies.front().header.recipient == NodeId{3});
     CHECK(machine.state() == MachineState::LOADING);
     CHECK(machine.load() == 40);
     CHECK(machine.occupiedBuffer() == loading);
-    CHECK(machine.tick(4, {}).empty());
+    CHECK(tickMachine(machine, 4, {}).empty());
 
-    const auto released = machine.tick(5, {});
+    const auto released = tickMachine(machine, 5, {});
     REQUIRE(released.size() == 2);
     REQUIRE(messageKind(released[0]) == MessageKind::RELEASE);
     CHECK(std::get<Release>(released[0].payload).request == attempt);
@@ -260,7 +277,7 @@ TEST_CASE("service processes requests and sends deferred replies after physicall
     CHECK_FALSE(machine.occupiedBuffer().has_value());
     CHECK(machine.state() == MachineState::EN_ROUTE);
     CHECK(machine.load() == 100);
-    CHECK(machine.tick(6, {}).empty());
+    CHECK(tickMachine(machine, 6, {}).empty());
     CHECK(machine.position() > 0);
 }
 
@@ -284,14 +301,14 @@ TEST_CASE("a new mission is applied only after the current service and exit")
     MachineConfig config;
     config.loading_rate = 40;
     Machine machine(1, std::vector<MachineId>{1}, config);
-    const auto first = machine.tick(1, {missionFor(1, MissionTarget::LOAD)});
+    const auto first = tickMachine(machine, 1, {missionFor(1, MissionTarget::LOAD)});
     REQUIRE(first.size() == 1);
     const auto original = std::get<Request>(first.front().payload).id;
     for (Tick tick = 2; tick <= 5; ++tick) {
-        const auto outgoing =
-            machine.tick(tick, tick == replacement_tick
-                                   ? std::vector<Message>{missionFor(1, MissionTarget::LOAD, 2)}
-                                   : std::vector<Message>{});
+        const auto outgoing = tickMachine(
+            machine, tick,
+            tick == replacement_tick ? std::vector<Message>{missionFor(1, MissionTarget::LOAD, 2)}
+                                     : std::vector<Message>{});
         if (tick < 5) {
             CHECK(machine.occupiedBuffer() == loading);
             CHECK(outgoing.empty());
@@ -302,7 +319,7 @@ TEST_CASE("a new mission is applied only after the current service and exit")
             CHECK_FALSE(machine.occupiedBuffer().has_value());
         }
     }
-    const auto next = machine.tick(6, {missionFor(1, MissionTarget::DUMP, 1)});
+    const auto next = tickMachine(machine, 6, {missionFor(1, MissionTarget::DUMP, 1)});
     REQUIRE(next.size() == 1);
     REQUIRE(messageKind(next.front()) == MessageKind::REQUEST);
     const auto request = std::get<Request>(next.front().payload);
@@ -310,11 +327,11 @@ TEST_CASE("a new mission is applied only after the current service and exit")
     CHECK(request.id.sequence > original.sequence);
     CHECK(machine.state() == MachineState::WAIT_PERMIT);
 
-    machine.tick(7, {missionFor(1, MissionTarget::LOAD, 2)});
+    tickMachine(machine, 7, {missionFor(1, MissionTarget::LOAD, 2)});
     CHECK(machine.occupiedBuffer() == loading);
-    machine.tick(8, {});
+    tickMachine(machine, 8, {});
     CHECK_FALSE(machine.occupiedBuffer().has_value());
-    CHECK(machine.tick(9, {}).empty());
+    CHECK(tickMachine(machine, 9, {}).empty());
     CHECK(machine.position() > 0);
 }
 
@@ -326,22 +343,22 @@ TEST_CASE("a replacement mission does not turn a moving machine before its curre
     config.loading_rate = 50;
     config.initial_position = 10;
     Machine machine(1, std::vector<MachineId>{1}, config);
-    machine.tick(1, {missionFor(1, MissionTarget::LOAD)});
+    tickMachine(machine, 1, {missionFor(1, MissionTarget::LOAD)});
     CHECK(machine.position() == 6);
-    CHECK(machine.tick(2, {missionFor(1, MissionTarget::DUMP, 2)}).empty());
+    CHECK(tickMachine(machine, 2, {missionFor(1, MissionTarget::DUMP, 2)}).empty());
     CHECK(machine.position() == 2);
-    const auto outgoing = machine.tick(3, {});
+    const auto outgoing = tickMachine(machine, 3, {});
     REQUIRE(outgoing.size() == 1);
     REQUIRE(messageKind(outgoing.front()) == MessageKind::REQUEST);
     CHECK(std::get<Request>(outgoing.front().payload).id.resource == loading);
-    machine.tick(4, {});
+    tickMachine(machine, 4, {});
     CHECK(machine.occupiedBuffer() == loading);
-    machine.tick(5, {});
+    tickMachine(machine, 5, {});
     CHECK(machine.load() == 50);
-    machine.tick(6, {});
+    tickMachine(machine, 6, {});
     CHECK(machine.load() == 100);
     CHECK_FALSE(machine.occupiedBuffer().has_value());
-    machine.tick(7, {});
+    tickMachine(machine, 7, {});
     CHECK(machine.position() == 4);
 }
 
@@ -355,12 +372,12 @@ TEST_CASE("only the latest addressed ARM mission starts an idle machine")
     // Deliberately malformed target to test rejection of an invalid mission
     // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
     const auto invalid = missionFor(1, static_cast<MissionTarget>(99));
-    CHECK(
-        machine.tick(1, {spoofed, broadcast, invalid, missionFor(2, MissionTarget::LOAD)}).empty());
+    CHECK(tickMachine(machine, 1, {spoofed, broadcast, invalid, missionFor(2, MissionTarget::LOAD)})
+              .empty());
     CHECK(machine.state() == MachineState::IDLE);
     CHECK(
-        machine
-            .tick(2, {missionFor(1, MissionTarget::DUMP, 2), missionFor(1, MissionTarget::LOAD, 1)})
+        tickMachine(machine, 2,
+                    {missionFor(1, MissionTarget::DUMP, 2), missionFor(1, MissionTarget::LOAD, 1)})
             .empty());
     CHECK(machine.state() == MachineState::EN_ROUTE);
     CHECK(machine.position() == 10);
@@ -472,13 +489,13 @@ TEST_CASE("invalid configuration rejects motion or service that could never comp
 TEST_CASE("duplicate backwards and skipped ticks cannot perform extra movement")
 {
     Machine machine(1);
-    machine.tick(1, {missionFor(1, MissionTarget::DUMP)});
+    tickMachine(machine, 1, {missionFor(1, MissionTarget::DUMP)});
     CHECK(machine.position() == 10);
-    CHECK_THROWS_AS(machine.tick(1, {}), std::invalid_argument);
-    CHECK_THROWS_AS(machine.tick(0, {}), std::invalid_argument);
-    CHECK_THROWS_AS(machine.tick(3, {}), std::invalid_argument);
+    CHECK_THROWS_AS(tickMachine(machine, 1, {}), std::invalid_argument);
+    CHECK_THROWS_AS(tickMachine(machine, 0, {}), std::invalid_argument);
+    CHECK_THROWS_AS(tickMachine(machine, 3, {}), std::invalid_argument);
     CHECK(machine.position() == 10);
-    CHECK_NOTHROW(machine.tick(2, {}));
+    CHECK_NOTHROW(tickMachine(machine, 2, {}));
     CHECK(machine.position() == 20);
 }
 
@@ -499,7 +516,33 @@ TEST_CASE("large coordinates and speed do not overflow when clamping movement")
         expected = 0;
     }
     Machine machine(1, std::vector<MachineId>{1}, config);
-    machine.tick(1, {missionFor(1, target)});
+    tickMachine(machine, 1, {missionFor(1, target)});
     CHECK(machine.position() == expected);
     CHECK(machine.state() == MachineState::WAIT_PERMIT);
+}
+
+TEST_CASE("missions are acknowledged again after ACK loss but executed only once")
+{
+    MachineConfig config;
+    config.loading_rate = 100;
+    Machine machine(1, std::vector<MachineId>{1}, config);
+    const auto mission = missionFor(1, MissionTarget::LOAD);
+    auto outgoing = machine.tick(1, {mission});
+    REQUIRE(outgoing.size() == 2);
+    REQUIRE(messageKind(outgoing.front()) == MessageKind::ACK);
+    CHECK(std::get<Ack>(outgoing.front().payload).message == mission.header.id);
+    CHECK(outgoing.front().header.recipient == ARM_NODE_ID);
+    CHECK(messageKind(outgoing.back()) == MessageKind::REQUEST);
+    machine.tick(2, {});
+    machine.tick(3, {});
+    REQUIRE_FALSE(machine.occupiedBuffer().has_value());
+    outgoing = machine.tick(4, {mission, mission});
+    REQUIRE(outgoing.size() == 2);
+    for (const auto& message : outgoing) {
+        REQUIRE(messageKind(message) == MessageKind::ACK);
+        CHECK(std::get<Ack>(message.payload).message == mission.header.id);
+    }
+    CHECK(outgoing[0].header.id.sequence != outgoing[1].header.id.sequence);
+    CHECK(machine.state() == MachineState::EN_ROUTE);
+    CHECK(machine.position() > 0);
 }

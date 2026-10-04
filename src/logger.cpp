@@ -25,6 +25,11 @@ std::string serialize(const LogRecord& record)
 
 } // namespace
 
+std::string nodeName(NodeId node)
+{
+    return node == ARM_NODE_ID ? "ARM" : "M" + std::to_string(node);
+}
+
 Logger::Logger(std::ostream& output, LogLevel minimum)
     : output_(output), minimum_(minimum), consumer_(&Logger::consume, this)
 {}

@@ -11,9 +11,10 @@ Machine::Machine(MachineId id, MachineClass machine_class)
 {}
 
 Machine::Machine(MachineId id, std::vector<MachineId> members, MachineConfig config,
-                 MachineClass machine_class)
+                 MachineClass machine_class, Logger* logger)
     : id_(id), machine_class_(machine_class), position_(config.initial_position),
-      load_(config.initial_load), config_(config), protocol_(id, std::move(members))
+      load_(config.initial_load), config_(config),
+      protocol_(id, std::move(members), config.retry_interval, logger)
 {
     if (config_.road_length <= 0 || config_.speed <= 0 || config_.loading_rate <= 0 ||
         config_.loading_rate > 100 || config_.unloading_rate <= 0 || config_.unloading_rate > 100 ||
@@ -31,8 +32,9 @@ std::vector<Message> Machine::tick(Tick now, const std::vector<Message>& incomin
 
     for (const auto& message : incoming) {
         protocol_.onMessage(message, now);
-        onMission(message);
+        onMission(message, now);
     }
+    protocol_.retry(now);
     if (state_ == MachineState::IDLE && pending_target_) {
         target_ = *pending_target_;
         pending_target_.reset();
@@ -65,7 +67,7 @@ ResourceId Machine::targetBuffer() const noexcept
                                           : ResourceId::UNLOADING_BUFFER;
 }
 
-void Machine::onMission(const Message& message)
+void Machine::onMission(const Message& message, Tick now)
 {
     const auto* mission = std::get_if<Mission>(&message.payload);
     if (!mission || message.header.id.sender != ARM_NODE_ID || message.header.recipient != id_) {
@@ -75,6 +77,7 @@ void Machine::onMission(const Message& message)
         mission->first_target != MissionTarget::DUMP) {
         return;
     }
+    protocol_.acknowledge(message.header.id, now);
     if (last_mission_sequence_ && mission->sequence <= *last_mission_sequence_) {
         return;
     }

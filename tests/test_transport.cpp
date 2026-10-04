@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <vector>
 
 using namespace fleetlink;
@@ -198,4 +199,114 @@ TEST_CASE("transport reports tick overflow instead of wrapping the delivery time
     CHECK_THROWS_AS(channel.send(request(1, 2, last, 2)), std::overflow_error);
     channel.advanceTo(last);
     CHECK(channel.receive(2).empty());
+}
+
+TEST_CASE("channel validates loss duplication and delay parameters")
+{
+    ChannelConfig config;
+    SUBCASE("negative loss")
+    {
+        config.loss = -0.1;
+    }
+    SUBCASE("excessive loss")
+    {
+        config.loss = 1.1;
+    }
+    SUBCASE("NaN loss")
+    {
+        config.loss = std::numeric_limits<double>::quiet_NaN();
+    }
+    SUBCASE("negative duplication")
+    {
+        config.dup = -0.1;
+    }
+    SUBCASE("infinite duplication")
+    {
+        config.dup = std::numeric_limits<double>::infinity();
+    }
+    SUBCASE("excessive duplication")
+    {
+        config.dup = 1.1;
+    }
+    SUBCASE("reversed delays")
+    {
+        config.delay_min = 2;
+        config.delay_max = 1;
+    }
+    CHECK_THROWS_AS((InMemoryTransport({1, 2}, config)), std::invalid_argument);
+}
+
+TEST_CASE("loss applies to addressed broadcast mission and acknowledgement messages")
+{
+    InMemoryTransport channel({1, 2, ARM_NODE_ID}, {42, 1, 0, 0, 1});
+    channel.send(request(1, 1, 0));
+    channel.send({{{ARM_NODE_ID, 1}, NodeId{1}, 0, 1}, Mission{1, MissionTarget::LOAD}});
+    channel.send({{{1, 2}, ARM_NODE_ID, 0, 2}, Ack{{ARM_NODE_ID, 1}}});
+    channel.advanceTo(100);
+    for (const auto id : std::vector<NodeId>{1, 2, ARM_NODE_ID}) {
+        CHECK(channel.receive(id).empty());
+    }
+    CHECK(channel.counters().sent == 4);
+    CHECK(channel.counters().lost == 4);
+    CHECK(channel.counters().duplicates == 0);
+    CHECK(channel.counters().delivered == 0);
+}
+
+TEST_CASE("surviving broadcast copies have fixed delay and may each be duplicated")
+{
+    InMemoryTransport channel({1, 2, 3}, {42, 0, 5, 5, 1});
+    channel.send(request(1, 7, 0));
+    channel.advanceTo(4);
+    CHECK(channel.receive(2).empty());
+    CHECK(channel.counters().delivered == 0);
+    channel.advanceTo(5);
+    for (const auto id : {2, 3}) {
+        CHECK(ids(channel.receive(id)) == std::vector<MessageId>{{1, 7}, {1, 7}});
+    }
+    CHECK(channel.receive(1).empty());
+    CHECK(channel.counters().sent == 2);
+    CHECK(channel.counters().lost == 0);
+    CHECK(channel.counters().duplicates == 2);
+    CHECK(channel.counters().delivered == 4);
+}
+
+TEST_CASE("dirty delivery is seeded independent of send order and can reorder messages")
+{
+    using Arrival = std::tuple<Tick, NodeId, NodeId, SequenceNumber>;
+    const auto run = [](std::uint64_t seed, bool reverse) {
+        std::vector<NodeId> nodes{1, 2, 3};
+        if (reverse) {
+            std::reverse(nodes.begin(), nodes.end());
+        }
+        InMemoryTransport channel(nodes, {seed, 0.2, 1, 10, 0.05});
+        for (SequenceNumber index = 1; index <= 100; ++index) {
+            channel.send(request(1, reverse ? 101 - index : index, 0));
+        }
+        std::vector<Arrival> arrivals;
+        bool reordered = false;
+        std::map<NodeId, SequenceNumber> previous;
+        for (Tick tick = 1; tick <= 10; ++tick) {
+            channel.advanceTo(tick);
+            for (NodeId recipient : {2, 3}) {
+                for (const auto& message : channel.receive(recipient)) {
+                    reordered = reordered || previous[recipient] > message.header.id.sequence;
+                    previous[recipient] = message.header.id.sequence;
+                    arrivals.emplace_back(tick, recipient, message.header.id.sender,
+                                          message.header.id.sequence);
+                }
+            }
+        }
+        const auto& counters = channel.counters();
+        CHECK(counters.sent == 200);
+        CHECK(counters.lost > 0);
+        CHECK(counters.duplicates > 0);
+        CHECK(counters.delivered == arrivals.size());
+        CHECK(counters.sent - counters.lost + counters.duplicates == counters.delivered);
+        CHECK(reordered);
+        return arrivals;
+    };
+    const auto reference = run(42, false);
+    CHECK(run(42, true) == reference);
+    CHECK(run(42, false) == reference);
+    CHECK(run(43, false) != reference);
 }
