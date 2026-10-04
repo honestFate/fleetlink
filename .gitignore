@@ -1,0 +1,34 @@
+# Project notes stay local, except the required submission notes.
+*.md
+!/NOTES.md
+
+# Build outputs and generated traces.
+/build*/
+/cmake-build*/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Testing/
+*.o
+*.a
+*.so
+*.so.*
+*.log
+*.jsonl
+
+# Python environments and caches.
+/.venv/
+/venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local workspace configuration.
+/.agents/
+/.codex/
+/.aws/
+/.idea/
+/.vscode/
+*.swp
+*~
