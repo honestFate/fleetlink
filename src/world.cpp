@@ -49,7 +49,8 @@ std::string stateName(MachineState state)
 World::World(std::vector<MachineId> members, MachineConfig config, Logger* logger,
              ChannelConfig channel)
     : logger_(logger), members_(validatedMembers(std::move(members))),
-      transport_(transportNodes(members_), channel, logger), retry_interval_(config.retry_interval)
+      transport_(transportNodes(members_), channel, logger), retry_interval_(config.retry_interval),
+      arm_control_(ARM_NODE_ID, transportNodes(members_), config.retry_interval)
 {
     for (const auto id : members_) {
         machines_.emplace(
@@ -59,6 +60,9 @@ World::World(std::vector<MachineId> members, MachineConfig config, Logger* logge
 
 void World::dispatch(MachineId id, MissionTarget target)
 {
+    if (!arm_online_) {
+        throw std::logic_error("ARM is offline");
+    }
     if (machines_.find(id) == machines_.end()) {
         throw std::invalid_argument("Unknown machine id");
     }
@@ -83,20 +87,25 @@ void World::step(Tick ticks)
         throw std::overflow_error("World tick overflow");
     }
     for (Tick step = 0; step < ticks; ++step) {
-        transport_.advanceTo(++tick_);
-        for (const auto& message : receive(ARM_NODE_ID)) {
-            arm_clock_ = nextLamportTime(arm_clock_, message.header.clock);
-            const auto* ack = std::get_if<Ack>(&message.payload);
-            if (ack && message.header.id.sender <= std::numeric_limits<MachineId>::max()) {
-                const auto pending =
-                    pending_missions_.find(static_cast<MachineId>(message.header.id.sender));
-                if (pending != pending_missions_.end() &&
-                    ack->message == pending->second.header.id) {
-                    pending_missions_.erase(pending);
-                }
+        ++tick_;
+        const auto failures = scheduled_failures_.find(tick_);
+        if (failures != scheduled_failures_.end()) {
+            for (const auto id : failures->second) {
+                fail(id);
+            }
+            scheduled_failures_.erase(failures);
+        }
+        transport_.advanceTo(tick_);
+        if (arm_online_) {
+            receiveArm();
+            retryMissions();
+            if (auto repeat = arm_control_.retry(tick_)) {
+                arm_clock_ = nextLamportTime(arm_clock_);
+                repeat->header.clock = arm_clock_;
+                repeat->header.sent_tick = tick_;
+                send(*repeat);
             }
         }
-        retryMissions();
 
         std::vector<Message> outgoing;
         for (auto& [id, record] : machines_) {
@@ -105,7 +114,7 @@ void World::step(Tick ticks)
             }
             const auto before = record.machine.occupiedBuffer();
             const auto state_before = record.machine.state();
-            const auto messages = record.machine.tick(tick_, receive(id));
+            const auto messages = record.machine.tick(tick_, receive(id), transport_.counters(id));
             // Observe physical occupancy after every update, never grant permissions here
             checkOccupancy();
             const auto after = record.machine.occupiedBuffer();
@@ -157,9 +166,17 @@ std::vector<MachineSnapshot> World::snapshot() const
         result.push_back({id, machine.machineClass(), machine.state(), machine.position(),
                           machine.load(), machine.connected(), machine.onRoute(),
                           machine.occupiedBuffer(), record.completed_loads,
-                          record.completed_unloads});
+                          record.completed_unloads, machine.halted()});
     }
     return result;
+}
+
+void World::failAt(MachineId id, Tick tick)
+{
+    if (tick <= tick_ || !machines_.count(id)) {
+        throw std::invalid_argument("Scheduled failure requires a known machine and future tick");
+    }
+    scheduled_failures_[tick].push_back(id);
 }
 
 void World::fail(MachineId id)
@@ -310,6 +327,124 @@ void World::retryMissions()
         message.header.clock = arm_clock_;
         logMessage(message, "mission_retry", ARM_NODE_ID, id);
         send(message);
+    }
+}
+
+Message World::armMessage(MessagePayload payload, std::optional<NodeId> recipient)
+{
+    if (arm_sequence_ == std::numeric_limits<SequenceNumber>::max()) {
+        throw std::overflow_error("ARM message sequence overflow");
+    }
+    arm_clock_ = nextLamportTime(arm_clock_);
+    return {{{ARM_NODE_ID, ++arm_sequence_}, recipient, tick_, arm_clock_}, payload};
+}
+
+void World::haltAll(NodeId initiator)
+{
+    sendControl(initiator, true);
+}
+void World::resume(NodeId initiator)
+{
+    sendControl(initiator, false);
+}
+
+void World::sendControl(NodeId initiator, bool halted)
+{
+    if (initiator == ARM_NODE_ID) {
+        if (!arm_online_) {
+            throw std::logic_error("ARM is offline");
+        }
+        const auto version = arm_control_.nextSequence();
+        const MessagePayload payload =
+            halted ? MessagePayload{Halt{version}} : MessagePayload{Resume{version}};
+        const auto message = armMessage(payload);
+        arm_control_.issue(message);
+        send(message);
+        return;
+    }
+    if (initiator > std::numeric_limits<MachineId>::max() ||
+        !machines_.count(static_cast<MachineId>(initiator))) {
+        throw std::invalid_argument("Unknown control initiator");
+    }
+    for (const auto& message :
+         machines_.at(static_cast<MachineId>(initiator)).machine.setHalted(halted, tick_)) {
+        send(message);
+    }
+}
+
+void World::setArmOnline(bool online)
+{
+    if (arm_online_ == online) {
+        return;
+    }
+    transport_.setOnline(ARM_NODE_ID, online);
+    arm_online_ = online;
+    if (logger_) {
+        logger_->log({tick_, "ARM", LogLevel::INFO, online ? "arm_online" : "arm_offline", {}});
+    }
+}
+
+std::vector<ArmMachineSnapshot> World::armSnapshot() const
+{
+    std::vector<ArmMachineSnapshot> result;
+    for (const auto id : members_) {
+        const auto found = telemetry_.find(id);
+        if (found == telemetry_.end()) {
+            result.push_back({id, std::nullopt, std::nullopt});
+        } else {
+            result.push_back({id, found->second.data, tick_ - found->second.received_tick});
+        }
+    }
+    return result;
+}
+
+void World::receiveArm()
+{
+    for (const auto& message : receive(ARM_NODE_ID)) {
+        arm_clock_ = nextLamportTime(arm_clock_, message.header.clock);
+        if (arm_control_.onMessage(message)) {
+            send(armMessage(Ack{message.header.id}, message.header.id.sender));
+        }
+        if (message.header.id.sender > std::numeric_limits<MachineId>::max()) {
+            continue;
+        }
+        const auto id = static_cast<MachineId>(message.header.id.sender);
+        if (const auto* ack = std::get_if<Ack>(&message.payload)) {
+            const auto pending = pending_missions_.find(id);
+            if (pending != pending_missions_.end() && ack->message == pending->second.header.id) {
+                pending_missions_.erase(pending);
+            }
+        }
+        const auto* sample = std::get_if<Telemetry>(&message.payload);
+        if (!sample || message.header.recipient != ARM_NODE_ID || !machines_.count(id)) {
+            continue;
+        }
+        const auto previous = telemetry_.find(id);
+        if (previous != telemetry_.end() && sample->sequence <= previous->second.data.sequence) {
+            logMessage(message, "telemetry_ignored", ARM_NODE_ID, ARM_NODE_ID);
+            continue;
+        }
+        telemetry_.insert_or_assign(id, TelemetryRecord{*sample, tick_});
+        if (logger_) {
+            logger_->log({tick_,
+                          "ARM",
+                          LogLevel::INFO,
+                          "telemetry",
+                          {{"from", nodeName(id)},
+                           {"sample_tick", message.header.sent_tick},
+                           {"seq", sample->sequence},
+                           {"pos", sample->position},
+                           {"state", stateName(sample->state)},
+                           {"load", std::int64_t{sample->load}},
+                           {"connected", sample->connected},
+                           {"halted", sample->halted},
+                           {"sent", sample->channel.sent},
+                           {"delivered", sample->channel.delivered},
+                           {"lost", sample->channel.lost},
+                           {"duplicates", sample->channel.duplicates},
+                           {"zone_wait_count", sample->zone_wait_count},
+                           {"zone_wait_ticks", sample->zone_wait_ticks}}});
+        }
     }
 }
 

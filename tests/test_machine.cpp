@@ -45,7 +45,8 @@ std::vector<Message> resourceMessages(std::vector<Message> messages)
     messages.erase(std::remove_if(messages.begin(), messages.end(),
                                   [](const auto& message) {
                                       return messageKind(message) == MessageKind::ACK ||
-                                             messageKind(message) == MessageKind::HEARTBEAT;
+                                             messageKind(message) == MessageKind::HEARTBEAT ||
+                                             messageKind(message) == MessageKind::TELEMETRY;
                                   }),
                    messages.end());
     return messages;
@@ -617,4 +618,86 @@ TEST_CASE("known limitation: falsely excluding a live holder can exceed physical
     CHECK(holder.occupiedBuffer() == loading);
     CHECK(waiter.occupiedBuffer() == loading);
     CHECK(holder.load() < 100);
+}
+
+TEST_CASE("HALT preserves half-loaded cargo and occupancy until its origin resumes")
+{
+    MachineConfig config;
+    config.loading_rate = config.unloading_rate = 25;
+    MissionTarget target = MissionTarget::LOAD;
+    SUBCASE("loading")
+    {}
+    SUBCASE("unloading")
+    {
+        target = MissionTarget::DUMP;
+        config.initial_position = config.road_length;
+        config.initial_load = 100;
+    }
+    Machine machine(1, std::vector<MachineId>{1}, config);
+    machine.tick(1, {missionFor(1, target)});
+    for (Tick tick = 2; tick <= 4; ++tick) {
+        machine.tick(tick, {});
+    }
+    REQUIRE(machine.load() == 50);
+    const auto buffer = machine.occupiedBuffer();
+    const auto position = machine.position();
+    const Message halt{{{ARM_NODE_ID, 2}, std::nullopt, 4, 20}, Halt{1}};
+    const auto stopped = machine.tick(5, {halt});
+    CHECK(machine.halted());
+    CHECK(machine.load() == 50);
+    CHECK(machine.occupiedBuffer() == buffer);
+    CHECK(std::any_of(stopped.begin(), stopped.end(), [](const auto& message) {
+        return messageKind(message) == MessageKind::HEARTBEAT;
+    }));
+    unsigned samples = 0;
+    for (Tick tick = 6; tick <= 30; ++tick) {
+        for (const auto& message : machine.tick(tick, {}, {10, 8, 2, 0})) {
+            if (const auto* telemetry = std::get_if<Telemetry>(&message.payload)) {
+                CHECK(telemetry->halted);
+                CHECK(telemetry->load == 50);
+                CHECK(telemetry->channel.sent == 10);
+                ++samples;
+            }
+            CHECK(messageKind(message) != MessageKind::RELEASE);
+        }
+        CHECK(machine.load() == 50);
+        CHECK(machine.position() == position);
+        CHECK(machine.occupiedBuffer() == buffer);
+    }
+    CHECK(samples == 3);
+    machine.tick(31, {{{{ARM_NODE_ID, 3}, std::nullopt, 30, 30}, Resume{2}}});
+    CHECK_FALSE(machine.halted());
+    CHECK(machine.load() == (target == MissionTarget::LOAD ? 75 : 25));
+    machine.tick(32, {});
+    CHECK_FALSE(machine.occupiedBuffer());
+}
+
+TEST_CASE("HALT with the last reply cancels permission before physical entry in either order")
+{
+    Machine machine(1, std::vector<MachineId>{1, 2});
+    const auto first = tickMachine(machine, 1, {missionFor(1, MissionTarget::LOAD)});
+    const auto old = std::get<Request>(first.front().payload).id;
+    std::vector<Message> incoming{replyFrom(2, old),
+                                  {{{ARM_NODE_ID, 2}, std::nullopt, 1, 20}, Halt{1}}};
+    SUBCASE("reply first")
+    {}
+    SUBCASE("halt first")
+    {
+        std::reverse(incoming.begin(), incoming.end());
+    }
+    const auto stopped = machine.tick(2, incoming);
+    CHECK(machine.halted());
+    CHECK_FALSE(machine.occupiedBuffer());
+    CHECK(std::any_of(stopped.begin(), stopped.end(), [](const auto& message) {
+        return messageKind(message) == MessageKind::CANCEL;
+    }));
+    const auto resumed =
+        tickMachine(machine, 3, {{{{ARM_NODE_ID, 3}, std::nullopt, 2, 30}, Resume{2}}});
+    REQUIRE(resumed.size() == 1);
+    const auto next = std::get<Request>(resumed.front().payload).id;
+    CHECK(next.sequence > old.sequence);
+    machine.tick(4, {replyFrom(2, old)});
+    CHECK_FALSE(machine.occupiedBuffer());
+    machine.tick(5, {replyFrom(2, next)});
+    CHECK(machine.occupiedBuffer() == loading);
 }

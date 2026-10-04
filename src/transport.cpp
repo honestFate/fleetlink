@@ -67,6 +67,7 @@ InMemoryTransport::InMemoryTransport(std::vector<NodeId> nodes, ChannelConfig co
     }
     for (const auto node : nodes_) {
         inboxes_.emplace(node, std::vector<Message>{});
+        sender_counters_.emplace(node, ChannelCounters{});
     }
 }
 
@@ -80,14 +81,18 @@ void InMemoryTransport::send(const Message& message)
     deliveryTick(current_tick_, config_.delay_max);
     for (const auto recipient : recipients) {
         ++counters_.sent;
-        if (disconnected_.count(message.header.id.sender) || disconnected_.count(recipient)) {
+        auto& local = sender_counters_.at(message.header.id.sender);
+        ++local.sent;
+        if (!isOnline(message.header.id.sender) || !isOnline(recipient)) {
             ++counters_.lost;
+            ++local.lost;
             logDelivery({current_tick_, recipient, message}, "msg_drop", LogLevel::WARN, "offline");
             continue;
         }
         auto random = deliveryRandom(config_.seed, message, recipient);
         if (chance(random, config_.loss)) {
             ++counters_.lost;
+            ++local.lost;
             logDelivery({current_tick_, recipient, message}, "msg_drop", LogLevel::WARN, "loss");
             continue;
         }
@@ -99,6 +104,7 @@ void InMemoryTransport::send(const Message& message)
             logDelivery(pending_.back(), "msg_schedule", LogLevel::TRACE);
             if (copy != 0) {
                 ++counters_.duplicates;
+                ++local.duplicates;
                 logDelivery(pending_.back(), "msg_duplicate", LogLevel::DEBUG);
             }
         }
@@ -146,13 +152,16 @@ void InMemoryTransport::advanceTo(Tick tick)
                      [tick](const auto& delivery) { return delivery.tick > tick; });
     current_tick_ = tick;
     for (auto delivery = pending_.begin(); delivery != waiting; ++delivery) {
-        if (disconnected_.count(delivery->recipient)) {
+        auto& local = sender_counters_.at(delivery->message.header.id.sender);
+        if (!isOnline(delivery->recipient) || offline_.count(delivery->message.header.id.sender)) {
             ++counters_.lost;
+            ++local.lost;
             logDelivery(*delivery, "msg_drop", LogLevel::WARN, "offline");
             continue;
         }
         inboxes_.at(delivery->recipient).push_back(delivery->message);
         ++counters_.delivered;
+        ++local.delivered;
         logDelivery(*delivery, "msg_deliver", LogLevel::TRACE);
     }
     pending_.erase(pending_.begin(), waiting);
@@ -166,6 +175,39 @@ void InMemoryTransport::disconnect(NodeId node)
     }
     disconnected_.insert(node);
     inbox->second.clear();
+}
+
+bool InMemoryTransport::isOnline(NodeId node) const
+{
+    if (!inboxes_.count(node)) {
+        throw std::invalid_argument("Unknown node");
+    }
+    return !disconnected_.count(node) && !offline_.count(node);
+}
+
+void InMemoryTransport::setOnline(NodeId node, bool online)
+{
+    if (!inboxes_.count(node)) {
+        throw std::invalid_argument("Unknown node");
+    }
+    if (online && disconnected_.count(node)) {
+        throw std::logic_error("Cannot reconnect a permanently failed node");
+    }
+    if (online) {
+        offline_.erase(node);
+    } else {
+        offline_.insert(node);
+        inboxes_.at(node).clear();
+    }
+}
+
+const ChannelCounters& InMemoryTransport::counters(NodeId sender) const
+{
+    const auto found = sender_counters_.find(sender);
+    if (found == sender_counters_.end()) {
+        throw std::invalid_argument("Unknown sender");
+    }
+    return found->second;
 }
 
 void InMemoryTransport::logDelivery(const PendingDelivery& delivery, const char* event,

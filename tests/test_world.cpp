@@ -49,6 +49,7 @@ void checkSnapshots(const World& left, const World& right)
         CHECK(lhs[index].load == rhs[index].load);
         CHECK(lhs[index].connected == rhs[index].connected);
         CHECK(lhs[index].on_route == rhs[index].on_route);
+        CHECK(lhs[index].halted == rhs[index].halted);
         CHECK(lhs[index].occupied_buffer == rhs[index].occupied_buffer);
         CHECK(lhs[index].completed_loads == rhs[index].completed_loads);
         CHECK(lhs[index].completed_unloads == rhs[index].completed_unloads);
@@ -255,6 +256,9 @@ TEST_CASE("asynchronous logs preserve every zone event and do not affect the mod
     std::istringstream input(output.str());
     for (std::string line; std::getline(input, line);) {
         const auto row = nlohmann::json::parse(line);
+        if (row.at("ev") == "telemetry") {
+            continue;
+        }
         CHECK(row.at("lvl") == "INFO");
         const auto node = row.at("node").get<std::string>();
         REQUIRE(node.front() == 'M');
@@ -481,14 +485,14 @@ TEST_CASE("S3 detects M3 locally and all survivors progress after detection")
     World permuted({5, 2, 4, 1, 3, 0}, {}, nullptr, channel);
     dispatchAll(first);
     dispatchAll(permuted);
-    first.step(1000);
-    permuted.step(1000);
+    first.step(999);
+    permuted.step(999);
     REQUIRE(first.snapshot()[3].state == MachineState::WAIT_PERMIT);
     const auto failed_before = first.snapshot()[3];
-    first.fail(3);
-    permuted.fail(3);
-    first.step(211);
-    permuted.step(211);
+    first.failAt(3, 1000);
+    permuted.failAt(3, 1000);
+    first.step(212);
+    permuted.step(212);
     const auto after_detection = first.snapshot();
     first.step(3789);
     permuted.step(3789);
@@ -588,4 +592,124 @@ TEST_CASE("a real failure inside a buffer removes occupancy without completing s
             CHECK(machine.completed_unloads > 0);
         }
     }
+}
+
+TEST_CASE("ARM sees delayed telemetry with age instead of reading current machine state")
+{
+    World world;
+    dispatchAll(world);
+    for (const auto& row : world.armSnapshot()) {
+        CHECK_FALSE(row.telemetry);
+        CHECK_FALSE(row.age);
+    }
+    world.step(10);
+    const auto sampled = world.snapshot();
+    for (const auto& row : world.armSnapshot()) {
+        CHECK_FALSE(row.telemetry);
+    }
+    world.step();
+    for (const auto& row : world.armSnapshot()) {
+        REQUIRE(row.telemetry);
+        CHECK(row.age == Tick{0});
+        CHECK(row.telemetry->sequence == 10);
+        CHECK(row.telemetry->position == sampled.at(row.id).position);
+        CHECK(row.telemetry->load == sampled.at(row.id).load);
+        CHECK(row.telemetry->state == sampled.at(row.id).state);
+        CHECK(row.telemetry->channel.sent > 0);
+    }
+    world.step();
+    for (const auto& row : world.armSnapshot()) {
+        CHECK(row.age == Tick{1});
+    }
+}
+
+TEST_CASE("S4 freezes ARM data while the fleet continues identically and refreshes on return")
+{
+    const ChannelConfig channel{42, 0.2, 1, 10, 0.05};
+    World outage({0, 1, 2, 3, 4, 5}, {}, nullptr, channel);
+    World online({0, 1, 2, 3, 4, 5}, {}, nullptr, channel);
+    dispatchAll(outage);
+    dispatchAll(online);
+    outage.step(799);
+    online.step(799);
+    const auto old = outage.armSnapshot();
+    const auto events_before = outage.events().size();
+    outage.setArmOnline(false);
+    CHECK_FALSE(outage.armOnline());
+    CHECK_THROWS_AS(outage.dispatch(0, MissionTarget::LOAD), std::logic_error);
+    CHECK_THROWS_AS(outage.haltAll(), std::logic_error);
+    outage.step(201);
+    online.step(201);
+    CHECK(outage.events().size() > events_before);
+    for (const auto& row : outage.armSnapshot()) {
+        REQUIRE(row.telemetry);
+        CHECK(row.telemetry->sequence == old.at(row.id).telemetry->sequence);
+        CHECK(*row.age == *old.at(row.id).age + 201);
+    }
+    checkSnapshots(outage, online);
+    CHECK(eventKeys(outage) == eventKeys(online));
+    outage.setArmOnline(true);
+    outage.step(100);
+    online.step(100);
+    for (const auto& row : outage.armSnapshot()) {
+        REQUIRE(row.telemetry);
+        CHECK(row.telemetry->sequence > 1000);
+        CHECK(*row.age < 100);
+    }
+    checkSnapshots(outage, online);
+    CHECK(eventKeys(outage) == eventKeys(online));
+}
+
+TEST_CASE("all HALT origins must resume and dirty commands eventually reach every machine")
+{
+    World world({0, 1, 2, 3, 4, 5}, {}, nullptr, {42, 0.2, 1, 10, 0.05});
+    dispatchAll(world);
+    world.step(200);
+    world.haltAll();
+    world.step(500);
+    for (const auto& machine : world.snapshot()) {
+        CHECK(machine.halted);
+    }
+    const auto frozen = world.snapshot();
+    world.haltAll(2);
+    world.step(500);
+    world.resume();
+    world.step(500);
+    for (const auto& machine : world.snapshot()) {
+        CHECK(machine.halted);
+        CHECK(machine.position == frozen.at(machine.id).position);
+        CHECK(machine.load == frozen.at(machine.id).load);
+        CHECK(machine.occupied_buffer == frozen.at(machine.id).occupied_buffer);
+    }
+    world.resume(2);
+    world.step(1000);
+    for (const auto& machine : world.snapshot()) {
+        CHECK_FALSE(machine.halted);
+        CHECK(machine.completed_unloads > frozen.at(machine.id).completed_unloads);
+    }
+}
+
+TEST_CASE("reordered duplicate telemetry never rolls back ARM data or refreshes old samples")
+{
+    World world({0, 1, 2, 3}, {}, nullptr, {42, 0, 1, 25, 1});
+    std::map<MachineId, SequenceNumber> versions;
+    std::map<MachineId, Tick> ages;
+    for (unsigned tick = 0; tick < 150; ++tick) {
+        world.step();
+        for (const auto& row : world.armSnapshot()) {
+            if (!row.telemetry) {
+                continue;
+            }
+            const auto version = row.telemetry->sequence;
+            CHECK(version >= versions[row.id]);
+            if (version == versions[row.id]) {
+                CHECK(*row.age == ages[row.id] + 1);
+            } else {
+                CHECK(*row.age == 0);
+            }
+            versions[row.id] = version;
+            ages[row.id] = *row.age;
+        }
+    }
+    CHECK(versions.size() == 4);
 }

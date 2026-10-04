@@ -14,9 +14,10 @@ namespace {
 
 void usage(std::ostream& output)
 {
-    output << "Usage: fleetlink_demo [--scenario S1|S2|S3] [--seed N] [--trace]\n"
+    output << "Usage: fleetlink_demo [--scenario S1|S2|S3|S4] [--seed N] [--trace]\n"
            << "S1: 2000 ticks, clean channel; S2: 5000 ticks, loss=0.2, delay=1..10, dup=0.05\n"
-           << "S3: S2 with M3 failing while waiting after tick 1000\n"
+           << "S3: S2 with M3 failing while waiting at the start of tick 1000\n"
+           << "S4: S2 with ARM offline during ticks 800..1000\n"
            << "All scenarios run 6 machines with k=1, default scenario S1 and seed 42\n"
            << "--trace writes JSONL events to stdout and the report to stderr\n";
 }
@@ -40,7 +41,8 @@ int main(int argc, char** argv)
         }
         if ((option == "--scenario" || option == "--seed") && index + 1 < argc) {
             const std::string_view value(argv[++index]);
-            if (option == "--scenario" && (value == "S1" || value == "S2" || value == "S3")) {
+            if (option == "--scenario" &&
+                (value == "S1" || value == "S2" || value == "S3" || value == "S4")) {
                 scenario = value;
                 continue;
             }
@@ -73,16 +75,30 @@ int main(int argc, char** argv)
         for (const auto& machine : world.snapshot()) {
             world.dispatch(machine.id, fleetlink::MissionTarget::LOAD);
         }
+        bool arm_recovered = true;
+        bool outage_progress = true;
         std::vector<fleetlink::MachineSnapshot> before_failure;
         if (scenario == "S3") {
-            world.step(1000);
+            world.step(999);
             before_failure = world.snapshot();
             if (before_failure.at(3).state != fleetlink::MachineState::WAIT_PERMIT) {
                 throw std::runtime_error(
                     "S3 requires M3 to be waiting for permission at tick 1000 for this seed");
             }
-            world.fail(3);
-            world.step(4000);
+            world.failAt(3, 1000);
+            world.step(4001);
+        } else if (scenario == "S4") {
+            world.step(799);
+            const auto before = world.events().size();
+            world.setArmOnline(false);
+            world.step(201);
+            outage_progress = world.events().size() > before;
+            world.setArmOnline(true);
+            world.step(100);
+            for (const auto& row : world.armSnapshot()) {
+                arm_recovered = arm_recovered && row.telemetry && row.age && *row.age < 100;
+            }
+            world.step(3900);
         } else {
             world.step(scenario == "S2" ? 5000 : 2000);
         }
@@ -93,7 +109,7 @@ int main(int argc, char** argv)
         auto& report = trace ? std::cerr : std::cout;
         report << scenario << ": 6 machines, " << world.currentTick()
                << " ticks, k=1, seed=" << seed << '\n';
-        bool progressed = true;
+        bool progressed = arm_recovered && outage_progress;
         for (const auto& machine : world.snapshot()) {
             report << "M" << machine.id << ": loads=" << machine.completed_loads
                    << ", unloads=" << machine.completed_unloads << '\n';
@@ -135,6 +151,9 @@ int main(int argc, char** argv)
                << ", lost=" << counters.lost << ", duplicates=" << counters.duplicates << '\n';
         report << "Max completed wait: " << max_wait << " ticks, still waiting: " << waiting.size()
                << '\n';
+        if (scenario == "S4") {
+            report << "ARM recovery: " << (arm_recovered ? "PASS" : "FAIL") << '\n';
+        }
         report << "Capacity checks: PASS\nProgress: " << (progressed ? "PASS" : "FAIL") << '\n';
         return progressed && std::cout && std::cerr ? 0 : 1;
     } catch (const std::exception& error) {

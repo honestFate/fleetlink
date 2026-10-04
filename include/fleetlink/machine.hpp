@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fleetlink/access_protocol.hpp"
+#include "fleetlink/stop_controller.hpp"
 
 #include <optional>
 #include <vector>
@@ -16,6 +17,7 @@ struct MachineConfig {
     int initial_load = 0;
     Tick retry_interval = 50;
     HeartbeatConfig heartbeat;
+    Tick telemetry_interval = 10;
 };
 
 class Machine {
@@ -27,7 +29,9 @@ public:
 
     // Process one tick and return messages for the simulation's send phase
     // Tick values must be consecutive after the first call
-    std::vector<Message> tick(Tick now, const std::vector<Message>& incoming);
+    std::vector<Message> tick(Tick now, const std::vector<Message>& incoming,
+                              ChannelCounters channel = {});
+    std::vector<Message> setHalted(bool halted, Tick now);
     // Permanent physical failure, no RELEASE or other peer notification
     void fail() noexcept;
 
@@ -38,6 +42,7 @@ public:
     int load() const noexcept { return load_; }
     bool connected() const noexcept { return connected_; }
     bool onRoute() const noexcept { return state_ != MachineState::FAULT; }
+    bool halted() const noexcept { return control_.halted(); }
     // Physical occupancy, separate from the protocol's permission to enter
     std::optional<ResourceId> occupiedBuffer() const noexcept { return occupied_buffer_; }
 
@@ -46,6 +51,8 @@ private:
     void onMission(const Message& message, Tick now);
     void move(Tick now);
     void service(Tick now);
+    void execute(Tick now);
+    void applyStop(Tick now, bool previously_halted);
 
     MachineId id_;
     MachineClass machine_class_;
@@ -54,12 +61,17 @@ private:
     int load_ = 0;              // 0..100%
     bool connected_ = true;     // Connection accessibility sign
     MachineConfig config_;
+    Logger* logger_;
+    StopController control_;
     AccessProtocol protocol_;
     MissionTarget target_ = MissionTarget::LOAD;
     std::optional<MissionTarget> pending_target_;
     std::optional<SequenceNumber> last_mission_sequence_;
     std::optional<ResourceId> occupied_buffer_;
     std::optional<Tick> last_tick_;
+    Tick last_telemetry_tick_ = 0;
+    std::uint64_t zone_wait_count_ = 0;
+    Tick zone_wait_ticks_ = 0;
 };
 
 } // namespace fleetlink

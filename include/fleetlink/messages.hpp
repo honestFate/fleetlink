@@ -108,6 +108,7 @@ struct Telemetry {
     ChannelCounters channel;
     std::uint64_t zone_wait_count;
     Tick zone_wait_ticks;
+    bool halted = false;
 };
 
 struct Halt {

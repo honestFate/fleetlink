@@ -21,6 +21,7 @@ add_subdirectory(third_party)
 add_library(fleetlink_core SHARED
     src/machine.cpp
     src/access_protocol.cpp
+    src/stop_controller.cpp
     src/messages.cpp
     src/transport.cpp
     src/logger.cpp
@@ -53,6 +54,7 @@ if(FLEETLINK_BUILD_TESTS)
     add_executable(fleetlink_tests
         tests/main.cpp
         tests/test_logger.cpp
+        tests/test_stop_controller.cpp
         tests/test_machine.cpp
         tests/test_messages.cpp
         tests/test_transport.cpp
@@ -68,6 +70,7 @@ if(FLEETLINK_BUILD_TESTS)
     add_test(NAME fleetlink_demo_s2_trace COMMAND fleetlink_demo --scenario S2 --trace)
     add_test(NAME fleetlink_demo_s3 COMMAND fleetlink_demo --scenario S3)
     add_test(NAME fleetlink_demo_s3_trace COMMAND fleetlink_demo --scenario S3 --trace)
+    add_test(NAME fleetlink_demo_s4 COMMAND fleetlink_demo --scenario S4)
 endif()
 
 # --- Python-модуль ------------------------------------------------------------

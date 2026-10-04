@@ -343,3 +343,35 @@ TEST_CASE("disconnection clears messages that were delivered but not consumed")
     CHECK(channel.receive(2).empty());
     CHECK(channel.counters().delivered == 1);
 }
+
+TEST_CASE("per-sender channel counters account for independent broadcast copies")
+{
+    InMemoryTransport channel({1, 2, 3}, {42, 0, 1, 1, 1});
+    channel.send(request(1, 1, 0));
+    channel.send(request(2, 1, 0, 1));
+    channel.advanceTo(1);
+    CHECK(channel.counters(1).sent == 2);
+    CHECK(channel.counters(1).duplicates == 2);
+    CHECK(channel.counters(1).delivered == 4);
+    CHECK(channel.counters(2).sent == 1);
+    CHECK(channel.counters(2).delivered == 2);
+    CHECK(channel.counters(3).sent == 0);
+    CHECK_THROWS_AS(channel.counters(99), std::invalid_argument);
+}
+
+TEST_CASE("temporary coverage loss drops in-flight traffic and permits reconnection")
+{
+    InMemoryTransport channel({1, 2}, {42, 0, 5, 5, 0});
+    channel.send(request(1, 1, 0, 2));
+    channel.advanceTo(1);
+    channel.setOnline(1, false);
+    channel.advanceTo(5);
+    CHECK(channel.receive(2).empty());
+    CHECK(channel.counters(1).lost == 1);
+    channel.setOnline(1, true);
+    channel.send(request(1, 2, 5, 2));
+    channel.advanceTo(10);
+    CHECK(ids(channel.receive(2)) == std::vector<MessageId>{{1, 2}});
+    channel.disconnect(1);
+    CHECK_THROWS_AS(channel.setOnline(1, true), std::logic_error);
+}

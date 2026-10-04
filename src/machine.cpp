@@ -6,6 +6,15 @@
 
 namespace fleetlink {
 
+namespace {
+std::vector<NodeId> controlNodes(const std::vector<MachineId>& members)
+{
+    std::vector<NodeId> nodes(members.begin(), members.end());
+    nodes.push_back(ARM_NODE_ID);
+    return nodes;
+}
+} // namespace
+
 Machine::Machine(MachineId id, MachineClass machine_class)
     : Machine(id, std::vector<MachineId>{id}, MachineConfig{}, machine_class)
 {}
@@ -13,17 +22,20 @@ Machine::Machine(MachineId id, MachineClass machine_class)
 Machine::Machine(MachineId id, std::vector<MachineId> members, MachineConfig config,
                  MachineClass machine_class, Logger* logger)
     : id_(id), machine_class_(machine_class), position_(config.initial_position),
-      load_(config.initial_load), config_(config),
+      load_(config.initial_load), config_(config), logger_(logger),
+      control_(id, controlNodes(members), config.retry_interval),
       protocol_(id, std::move(members), config.retry_interval, logger, config.heartbeat)
 {
     if (config_.road_length <= 0 || config_.speed <= 0 || config_.loading_rate <= 0 ||
         config_.loading_rate > 100 || config_.unloading_rate <= 0 || config_.unloading_rate > 100 ||
-        position_ < 0 || position_ > config_.road_length || load_ < 0 || load_ > 100) {
+        position_ < 0 || position_ > config_.road_length || load_ < 0 || load_ > 100 ||
+        config_.telemetry_interval == 0) {
         throw std::invalid_argument("Invalid machine configuration");
     }
 }
 
-std::vector<Message> Machine::tick(Tick now, const std::vector<Message>& incoming)
+std::vector<Message> Machine::tick(Tick now, const std::vector<Message>& incoming,
+                                   ChannelCounters channel)
 {
     if (last_tick_ && (now <= *last_tick_ || now - *last_tick_ != 1)) {
         throw std::invalid_argument("Machine ticks must be consecutive");
@@ -32,12 +44,37 @@ std::vector<Message> Machine::tick(Tick now, const std::vector<Message>& incomin
     if (state_ == MachineState::FAULT) {
         return {};
     }
+    if (state_ == MachineState::WAIT_PERMIT) {
+        ++zone_wait_ticks_;
+    }
 
     for (const auto& message : incoming) {
         protocol_.onMessage(message, now);
         onMission(message, now);
+        const bool before = halted();
+        if (control_.onMessage(message)) {
+            protocol_.acknowledge(message.header.id, now);
+            applyStop(now, before);
+        }
     }
     protocol_.tick(now);
+    if (const auto repeat = control_.retry(now)) {
+        protocol_.resend(*repeat, now);
+    }
+    if (!halted()) {
+        execute(now);
+    }
+    if (now >= last_telemetry_tick_ && now - last_telemetry_tick_ >= config_.telemetry_interval) {
+        last_telemetry_tick_ = now;
+        protocol_.send(Telemetry{now, position_, state_, load_, connected_, channel,
+                                 zone_wait_count_, zone_wait_ticks_, halted()},
+                       now, ARM_NODE_ID);
+    }
+    return protocol_.takeOutgoing();
+}
+
+void Machine::execute(Tick now)
+{
     if (state_ == MachineState::IDLE && pending_target_) {
         target_ = *pending_target_;
         pending_target_.reset();
@@ -46,14 +83,18 @@ std::vector<Message> Machine::tick(Tick now, const std::vector<Message>& incomin
 
     if (state_ == MachineState::EN_ROUTE) {
         move(now);
-        return protocol_.takeOutgoing();
+        return;
     }
     if (state_ == MachineState::WAIT_PERMIT) {
+        if (!protocol_.isWaiting(targetBuffer()) && !protocol_.hasPermission(targetBuffer())) {
+            protocol_.request(targetBuffer(), now);
+            return;
+        }
         if (protocol_.hasPermission(targetBuffer())) {
             occupied_buffer_ = targetBuffer();
             state_ = MachineState::IN_ZONE;
         }
-        return protocol_.takeOutgoing();
+        return;
     }
     if (state_ == MachineState::IN_ZONE) {
         state_ = target_ == MissionTarget::LOAD ? MachineState::LOADING : MachineState::UNLOADING;
@@ -61,7 +102,34 @@ std::vector<Message> Machine::tick(Tick now, const std::vector<Message>& incomin
     if (state_ == MachineState::LOADING || state_ == MachineState::UNLOADING) {
         service(now);
     }
+}
+
+std::vector<Message> Machine::setHalted(bool stopped, Tick now)
+{
+    if (!onRoute()) {
+        throw std::logic_error("Failed machine cannot initiate control commands");
+    }
+    const bool before = halted();
+    const auto version = control_.nextSequence();
+    const MessagePayload payload =
+        stopped ? MessagePayload{Halt{version}} : MessagePayload{Resume{version}};
+    control_.issue(protocol_.send(payload, now));
+    applyStop(now, before);
     return protocol_.takeOutgoing();
+}
+
+void Machine::applyStop(Tick now, bool previously_halted)
+{
+    if (halted() && !occupied_buffer_) {
+        protocol_.cancel(now);
+    }
+    if (logger_ && previously_halted != halted()) {
+        logger_->log({now,
+                      nodeName(id_),
+                      LogLevel::INFO,
+                      halted() ? "halt_applied" : "resume_applied",
+                      {{"pos", position_}, {"load", std::int64_t{load_}}}});
+    }
 }
 
 void Machine::fail() noexcept
@@ -106,6 +174,7 @@ void Machine::move(Tick now)
     }
     if (position_ == destination) {
         protocol_.request(targetBuffer(), now);
+        ++zone_wait_count_;
         state_ = MachineState::WAIT_PERMIT;
     }
 }

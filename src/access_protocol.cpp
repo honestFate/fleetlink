@@ -74,6 +74,33 @@ void AccessProtocol::release(ResourceId resource, Tick tick)
     granted_ = false;
 }
 
+void AccessProtocol::cancel(Tick tick)
+{
+    if (!request_) {
+        return;
+    }
+    outgoing_.push_back({makeHeader(tick), Cancel{request_->id}});
+    replyDeferred(tick);
+    replies_.clear();
+    request_.reset();
+    granted_ = false;
+}
+
+Message AccessProtocol::send(MessagePayload payload, Tick tick, std::optional<NodeId> recipient)
+{
+    Message message{makeHeader(tick, recipient), payload};
+    outgoing_.push_back(message);
+    return message;
+}
+
+void AccessProtocol::resend(Message message, Tick tick)
+{
+    clock_ = nextLamportTime(clock_);
+    message.header.clock = clock_;
+    message.header.sent_tick = tick;
+    outgoing_.push_back(message);
+}
+
 void AccessProtocol::onMessage(const Message& message, Tick tick)
 {
     if (message.header.recipient && *message.header.recipient != id_) {

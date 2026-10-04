@@ -26,6 +26,8 @@ public:
     RequestId request(ResourceId resource, Tick tick);
     // Call only after physically leaving the buffer
     void release(ResourceId resource, Tick tick);
+    // Cancel only before physical entry, including a permission obtained on this tick
+    void cancel(Tick tick);
     void onMessage(const Message& message, Tick tick);
     // Run after incoming messages so an arriving reply can cancel a retry
     void retry(Tick tick);
@@ -33,6 +35,8 @@ public:
     void tick(Tick now);
     void acknowledge(MessageId message, Tick tick);
     bool isActive(MachineId peer) const noexcept;
+    Message send(MessagePayload payload, Tick tick, std::optional<NodeId> recipient = std::nullopt);
+    void resend(Message message, Tick tick);
 
     bool isWaiting(ResourceId resource) const noexcept;
     // A logical reservation, independent of the machine's physical position

@@ -20,6 +20,13 @@ struct MachineSnapshot {
     std::optional<ResourceId> occupied_buffer;
     std::uint64_t completed_loads;
     std::uint64_t completed_unloads;
+    bool halted;
+};
+
+struct ArmMachineSnapshot {
+    MachineId id;
+    std::optional<Telemetry> telemetry;
+    std::optional<Tick> age;
 };
 
 enum class ZoneEventKind {
@@ -47,6 +54,13 @@ public:
     void step(Tick ticks = 1);
     // Inject a permanent physical failure at the current tick, without notifying peers
     void fail(MachineId id);
+    // Apply a failure before message delivery and physical updates at the specified tick
+    void failAt(MachineId id, Tick tick);
+    void haltAll(NodeId initiator = ARM_NODE_ID);
+    void resume(NodeId initiator = ARM_NODE_ID);
+    void setArmOnline(bool online);
+    bool armOnline() const noexcept { return arm_online_; }
+    std::vector<ArmMachineSnapshot> armSnapshot() const;
 
     Tick currentTick() const noexcept { return tick_; }
     // Actual model state, independent of ARM telemetry
@@ -68,17 +82,28 @@ private:
     void send(const Message& message);
     std::vector<Message> receive(NodeId recipient);
     void retryMissions();
+    void sendControl(NodeId initiator, bool halted);
+    void receiveArm();
+    Message armMessage(MessagePayload payload, std::optional<NodeId> recipient = std::nullopt);
+    struct TelemetryRecord {
+        Telemetry data;
+        Tick received_tick;
+    };
 
     Logger* logger_;
     std::vector<MachineId> members_;
     InMemoryTransport transport_;
     std::map<MachineId, MachineRecord> machines_;
     Tick tick_ = 0;
+    std::map<Tick, std::vector<MachineId>> scheduled_failures_;
     SequenceNumber arm_sequence_ = 0;
     LamportTime arm_clock_ = 0;
     Tick retry_interval_;
     std::map<MachineId, Message> pending_missions_;
     std::vector<ZoneEvent> events_;
+    StopController arm_control_;
+    bool arm_online_ = true;
+    std::map<MachineId, TelemetryRecord> telemetry_;
 };
 
 } // namespace fleetlink

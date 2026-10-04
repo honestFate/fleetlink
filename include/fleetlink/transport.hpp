@@ -38,7 +38,10 @@ public:
     void advanceTo(Tick tick);
     // A permanently failed endpoint cannot send or receive, packets already sent may arrive
     void disconnect(NodeId node);
+    void setOnline(NodeId node, bool online);
+    bool isOnline(NodeId node) const;
     const ChannelCounters& counters() const noexcept { return counters_; }
+    const ChannelCounters& counters(NodeId sender) const;
 
 private:
     struct PendingDelivery {
@@ -59,6 +62,8 @@ private:
     std::vector<PendingDelivery> pending_;
     std::map<NodeId, std::vector<Message>> inboxes_;
     std::set<NodeId> disconnected_;
+    std::set<NodeId> offline_;
+    std::map<NodeId, ChannelCounters> sender_counters_;
 };
 
 } // namespace fleetlink
