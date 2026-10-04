@@ -1,0 +1,17 @@
+# Enum storage size is not a performance target for this small model
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-branch-clone,
+  bugprone-dangling-handle,
+  bugprone-integer-division,
+  bugprone-macro-parentheses,
+  bugprone-narrowing-conversions,
+  bugprone-sizeof-expression,
+  bugprone-use-after-move,
+  performance-*,
+  -performance-enum-size
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(^|.*/)(include/fleetlink|src|tests|bindings)/'
+SystemHeaders: false
+FormatStyle: file

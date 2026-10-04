@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 17) # 20/23 — если хотите
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(FLEETLINK_BUILD_PYTHON "Build the Python module" OFF)
 option(FLEETLINK_BUILD_TESTS "Build tests" ON)
@@ -85,3 +86,5 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         endif()
     endforeach()
 endif()
+
+include(cmake/CodeQuality.cmake)

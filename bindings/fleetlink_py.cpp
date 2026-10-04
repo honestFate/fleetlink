@@ -23,8 +23,8 @@ PYBIND11_MODULE(fleetlink, m)
         .value("OFFLINE", fleetlink::MachineState::OFFLINE);
 
     py::class_<fleetlink::Machine>(m, "Machine")
-        .def(py::init<fleetlink::MachineId, fleetlink::MachineClass>(),
-             py::arg("id"), py::arg("machine_class") = fleetlink::MachineClass::HAULER)
+        .def(py::init<fleetlink::MachineId, fleetlink::MachineClass>(), py::arg("id"),
+             py::arg("machine_class") = fleetlink::MachineClass::HAULER)
         .def_property_readonly("id", &fleetlink::Machine::id)
         .def_property_readonly("machine_class", &fleetlink::Machine::machineClass)
         .def_property_readonly("state", &fleetlink::Machine::state)

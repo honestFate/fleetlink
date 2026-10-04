@@ -36,6 +36,8 @@ TEST_CASE("broadcast excludes its sender and is independent of the node list ord
     const std::vector<NodeId> expected{0, 7, ARM_NODE_ID};
 
     do {
+        // Keep a snapshot to detect changes to the input
+        // NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
         const auto original = nodes;
         CHECK(recipientsFor(heartbeat(3, 1, 0), nodes) == expected);
         CHECK(nodes == original);
@@ -65,11 +67,13 @@ TEST_CASE("message order depends on send tick and stable ids instead of insertio
 
     do {
         std::vector<Message> messages;
+        messages.reserve(input.size());
         for (const auto index : permutation) {
             messages.push_back(input[index]);
         }
         std::sort(messages.begin(), messages.end(), messageBefore);
         std::vector<MessageId> actual;
+        actual.reserve(messages.size());
         for (const auto& message : messages) {
             actual.push_back(message.header.id);
         }
