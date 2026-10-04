@@ -45,7 +45,7 @@ endif()
 
 # --- нативное демо: именно его гоняем под санитайзерами -----------------------
 add_executable(fleetlink_demo src/main.cpp)
-target_link_libraries(fleetlink_demo PRIVATE fleetlink_core)
+target_link_libraries(fleetlink_demo PRIVATE fleetlink_core nlohmann_json::nlohmann_json)
 
 # --- нативные тесты -----------------------------------------------------------
 if(FLEETLINK_BUILD_TESTS)
@@ -60,6 +60,7 @@ if(FLEETLINK_BUILD_TESTS)
     )
     target_link_libraries(fleetlink_tests PRIVATE fleetlink_core doctest::doctest)
     add_test(NAME fleetlink_tests COMMAND fleetlink_tests)
+    add_test(NAME fleetlink_demo COMMAND fleetlink_demo)
 endif()
 
 # --- Python-модуль ------------------------------------------------------------
