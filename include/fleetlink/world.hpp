@@ -1,5 +1,6 @@
 #pragma once
 
+#include "fleetlink/logger.hpp"
 #include "fleetlink/machine.hpp"
 #include "fleetlink/transport.hpp"
 
@@ -35,7 +36,9 @@ struct ZoneEvent {
 
 class World {
 public:
-    explicit World(std::vector<MachineId> members = {0, 1, 2, 3, 4, 5}, MachineConfig config = {});
+    // An optional logger must outlive the world and its calls
+    explicit World(std::vector<MachineId> members = {0, 1, 2, 3, 4, 5}, MachineConfig config = {},
+                   Logger* logger = nullptr);
 
     // Send an addressed MISSION through the same transport as peer messages
     void dispatch(MachineId id, MissionTarget target);
@@ -54,7 +57,13 @@ private:
     };
 
     void checkOccupancy() const;
+    void recordZone(MachineId id, ZoneEventKind kind, ResourceId resource);
+    void logMessage(const Message& message, const char* event, NodeId node,
+                    std::optional<NodeId> recipient);
+    void send(const Message& message);
+    std::vector<Message> receive(NodeId recipient);
 
+    Logger* logger_;
     std::vector<MachineId> members_;
     InMemoryTransport transport_;
     std::map<MachineId, MachineRecord> machines_;

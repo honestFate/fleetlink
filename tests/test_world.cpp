@@ -1,11 +1,13 @@
 #include "fleetlink/world.hpp"
 
 #include <doctest/doctest.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
@@ -232,4 +234,111 @@ TEST_CASE("world detects tick overflow before advancing or consuming queued miss
     world.step();
     CHECK(world.snapshot()[0].state == MachineState::WAIT_PERMIT);
     CHECK(world.events().front().tick == 2);
+}
+
+TEST_CASE("asynchronous logs preserve every zone event and do not affect the model")
+{
+    std::ostringstream output;
+    Logger logger(output);
+    World logged({0, 1, 2, 3, 4, 5}, {}, &logger);
+    World plain;
+    dispatchAll(logged);
+    dispatchAll(plain);
+    logged.step(2000);
+    plain.step(2000);
+    logger.close();
+    checkSnapshots(logged, plain);
+    CHECK(eventKeys(logged) == eventKeys(plain));
+
+    std::vector<EventKey> actual;
+    std::istringstream input(output.str());
+    for (std::string line; std::getline(input, line);) {
+        const auto row = nlohmann::json::parse(line);
+        CHECK(row.at("lvl") == "INFO");
+        const auto node = row.at("node").get<std::string>();
+        REQUIRE(node.front() == 'M');
+        const auto id = static_cast<MachineId>(std::stoul(node.substr(1)));
+        const auto resource = row.at("zone") == "LOADING_BUFFER" ? ResourceId::LOADING_BUFFER
+                                                                 : ResourceId::UNLOADING_BUFFER;
+        auto kind = ZoneEventKind::LEAVE;
+        if (row.at("ev") == "zone_request") {
+            kind = ZoneEventKind::REQUEST;
+        } else if (row.at("ev") == "zone_enter") {
+            kind = ZoneEventKind::ENTER;
+        } else {
+            CHECK(row.at("ev") == "zone_leave");
+        }
+        actual.emplace_back(row.at("tick").get<Tick>(), id, kind, resource);
+    }
+    CHECK(actual == eventKeys(logged));
+}
+
+TEST_CASE("full asynchronous traces retain message identities and are reproducible")
+{
+    std::ostringstream first_output;
+    std::ostringstream second_output;
+    Logger first_log(first_output, LogLevel::TRACE);
+    Logger second_log(second_output, LogLevel::TRACE);
+    World first({0, 3, 7, 11}, {}, &first_log);
+    World second({11, 7, 3, 0}, {}, &second_log);
+    dispatchAll(first);
+    dispatchAll(second);
+    first.step(100);
+    for (unsigned tick = 0; tick < 100; ++tick) {
+        second.step();
+    }
+    first_log.close();
+    second_log.close();
+    CHECK(first_output.str() == second_output.str());
+    checkSnapshots(first, second);
+
+    using MessageKey = std::pair<std::string, SequenceNumber>;
+    std::map<MessageKey, nlohmann::json> sent;
+    std::set<std::tuple<std::string, SequenceNumber, std::string>> received;
+    std::istringstream input(first_output.str());
+    Tick previous_tick = 0;
+    unsigned state_changes = 0;
+    unsigned releases = 0;
+    for (std::string line; std::getline(input, line);) {
+        const auto row = nlohmann::json::parse(line);
+        const auto tick = row.at("tick").get<Tick>();
+        CHECK(tick >= previous_tick);
+        previous_tick = tick;
+        if (row.at("ev") == "state_change") {
+            CHECK(row.at("lvl") == "DEBUG");
+            CHECK(row.at("from") != row.at("to"));
+            CHECK(row.contains("pos"));
+            CHECK(row.contains("load"));
+            ++state_changes;
+        }
+        if (row.at("ev") == "msg_send") {
+            CHECK(row.at("lvl") == "TRACE");
+            const MessageKey key{row.at("from").get<std::string>(), row.at("seq")};
+            CHECK(sent.emplace(key, row).second);
+            CHECK(row.at("node") == row.at("from"));
+            if (row.at("kind") == "MISSION") {
+                CHECK(row.at("target") == "load");
+                CHECK(row.contains("mission_seq"));
+            }
+            if (row.at("kind") == "RELEASE") {
+                CHECK(row.contains("request_seq"));
+                ++releases;
+            }
+        }
+        if (row.at("ev") == "msg_receive") {
+            const MessageKey key{row.at("from").get<std::string>(), row.at("seq")};
+            REQUIRE(sent.count(key) == 1);
+            const auto to = row.at("to").get<std::string>();
+            CHECK(received.emplace(key.first, key.second, to).second);
+            CHECK(row.at("node") == to);
+            CHECK(row.at("sent_tick") < tick);
+            CHECK(row.at("clock") == sent.at(key).at("clock"));
+            CHECK(row.at("kind") == sent.at(key).at("kind"));
+            CHECK(row.at("sent_tick") == sent.at(key).at("tick"));
+        }
+    }
+    CHECK_FALSE(sent.empty());
+    CHECK_FALSE(received.empty());
+    CHECK(state_changes > 0);
+    CHECK(releases > 0);
 }

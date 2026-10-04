@@ -1,6 +1,7 @@
 #include "fleetlink/world.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -29,10 +30,30 @@ std::vector<NodeId> transportNodes(const std::vector<MachineId>& members)
     return nodes;
 }
 
+std::string nodeName(NodeId node)
+{
+    return node == ARM_NODE_ID ? "ARM" : "M" + std::to_string(node);
+}
+
+std::string resourceName(ResourceId resource)
+{
+    constexpr std::array<const char*, 4> names{"LOADING_BUFFER", "UNLOADING_BUFFER",
+                                               "LOADING_SERVICE", "UNLOADING_SERVICE"};
+    return names.at(static_cast<std::size_t>(resource));
+}
+
+std::string stateName(MachineState state)
+{
+    constexpr std::array<const char*, 8> names{"IDLE",    "EN_ROUTE",  "WAIT_PERMIT", "IN_ZONE",
+                                               "LOADING", "UNLOADING", "FAULT",       "OFFLINE"};
+    return names.at(static_cast<std::size_t>(state));
+}
+
 } // namespace
 
-World::World(std::vector<MachineId> members, MachineConfig config)
-    : members_(validatedMembers(std::move(members))), transport_(transportNodes(members_))
+World::World(std::vector<MachineId> members, MachineConfig config, Logger* logger)
+    : logger_(logger), members_(validatedMembers(std::move(members))),
+      transport_(transportNodes(members_))
 {
     for (const auto id : members_) {
         machines_.emplace(id, MachineRecord{Machine(id, members_, config)});
@@ -52,7 +73,7 @@ void World::dispatch(MachineId id, MissionTarget target)
     }
     const auto sequence = arm_sequence_ + 1;
     const auto clock = nextLamportTime(arm_clock_);
-    transport_.send({{{ARM_NODE_ID, sequence}, id, tick_, clock}, Mission{sequence, target}});
+    send({{{ARM_NODE_ID, sequence}, id, tick_, clock}, Mission{sequence, target}});
     arm_sequence_ = sequence;
     arm_clock_ = clock;
 }
@@ -64,19 +85,20 @@ void World::step(Tick ticks)
     }
     for (Tick step = 0; step < ticks; ++step) {
         transport_.advanceTo(++tick_);
-        for (const auto& message : transport_.receive(ARM_NODE_ID)) {
+        for (const auto& message : receive(ARM_NODE_ID)) {
             arm_clock_ = nextLamportTime(arm_clock_, message.header.clock);
         }
 
         std::vector<Message> outgoing;
         for (auto& [id, record] : machines_) {
             const auto before = record.machine.occupiedBuffer();
-            const auto messages = record.machine.tick(tick_, transport_.receive(id));
+            const auto state_before = record.machine.state();
+            const auto messages = record.machine.tick(tick_, receive(id));
             // Observe physical occupancy after every update, never grant permissions here
             checkOccupancy();
             const auto after = record.machine.occupiedBuffer();
             if (before && !after) {
-                events_.push_back({tick_, id, ZoneEventKind::LEAVE, *before});
+                recordZone(id, ZoneEventKind::LEAVE, *before);
                 if (*before == ResourceId::LOADING_BUFFER) {
                     ++record.completed_loads;
                 } else {
@@ -84,18 +106,29 @@ void World::step(Tick ticks)
                 }
             }
             if (!before && after) {
-                events_.push_back({tick_, id, ZoneEventKind::ENTER, *after});
+                recordZone(id, ZoneEventKind::ENTER, *after);
             }
             for (const auto& message : messages) {
                 if (const auto* request = std::get_if<Request>(&message.payload)) {
-                    events_.push_back({tick_, id, ZoneEventKind::REQUEST, request->id.resource});
+                    recordZone(id, ZoneEventKind::REQUEST, request->id.resource);
                 }
+            }
+            if (logger_ && logger_->enabled(LogLevel::DEBUG) &&
+                state_before != record.machine.state()) {
+                logger_->log({tick_,
+                              nodeName(id),
+                              LogLevel::DEBUG,
+                              "state_change",
+                              {{"from", stateName(state_before)},
+                               {"to", stateName(record.machine.state())},
+                               {"pos", record.machine.position()},
+                               {"load", std::int64_t{record.machine.load()}}}});
             }
             outgoing.insert(outgoing.end(), messages.begin(), messages.end());
         }
         std::sort(outgoing.begin(), outgoing.end(), messageBefore);
         for (const auto& message : outgoing) {
-            transport_.send(message);
+            send(message);
         }
     }
 }
@@ -123,8 +156,89 @@ void World::checkOccupancy() const
         unloading_count += buffer == ResourceId::UNLOADING_BUFFER;
     }
     if (loading_count > 1 || unloading_count > 1) {
+        if (logger_) {
+            logger_->log({tick_,
+                          "WORLD",
+                          LogLevel::ERROR,
+                          "capacity_violation",
+                          {{"loading", std::uint64_t{loading_count}},
+                           {"unloading", std::uint64_t{unloading_count}}}});
+        }
         throw std::logic_error("Buffer capacity exceeded at tick " + std::to_string(tick_));
     }
+}
+
+void World::recordZone(MachineId id, ZoneEventKind kind, ResourceId resource)
+{
+    events_.push_back({tick_, id, kind, resource});
+    if (logger_) {
+        constexpr std::array<const char*, 3> names{"zone_request", "zone_enter", "zone_leave"};
+        logger_->log({tick_,
+                      nodeName(id),
+                      LogLevel::INFO,
+                      names.at(static_cast<std::size_t>(kind)),
+                      {{"zone", resourceName(resource)}}});
+    }
+}
+
+void World::logMessage(const Message& message, const char* event, NodeId node,
+                       std::optional<NodeId> recipient)
+{
+    if (!logger_ || !logger_->enabled(LogLevel::TRACE)) {
+        return;
+    }
+    constexpr std::array<const char*, 10> kinds{"HEARTBEAT", "MISSION",   "REQUEST", "REPLY",
+                                                "RELEASE",   "TELEMETRY", "HALT",    "RESUME",
+                                                "ACK",       "CANCEL"};
+    LogRecord record{
+        tick_,
+        nodeName(node),
+        LogLevel::TRACE,
+        event,
+        {{"from", nodeName(message.header.id.sender)},
+         {"to", recipient ? nodeName(*recipient) : "broadcast"},
+         {"kind", std::string(kinds.at(static_cast<std::size_t>(messageKind(message))))},
+         {"seq", message.header.id.sequence},
+         {"sent_tick", message.header.sent_tick},
+         {"clock", message.header.clock}}};
+    const auto* request = std::get_if<Request>(&message.payload);
+    const auto* reply = std::get_if<Reply>(&message.payload);
+    const auto* release = std::get_if<Release>(&message.payload);
+    std::optional<RequestId> attempt;
+    if (request) {
+        attempt = request->id;
+        record.fields.emplace("request_clock", request->timestamp);
+    } else if (reply) {
+        attempt = reply->request;
+    } else if (release) {
+        attempt = release->request;
+    }
+    if (attempt) {
+        record.fields.emplace("zone", resourceName(attempt->resource));
+        record.fields.emplace("requester", nodeName(attempt->requester));
+        record.fields.emplace("request_seq", attempt->sequence);
+    }
+    if (const auto* mission = std::get_if<Mission>(&message.payload)) {
+        record.fields.emplace("mission_seq", mission->sequence);
+        record.fields.emplace(
+            "target", std::string(mission->first_target == MissionTarget::LOAD ? "load" : "dump"));
+    }
+    logger_->log(std::move(record));
+}
+
+void World::send(const Message& message)
+{
+    transport_.send(message);
+    logMessage(message, "msg_send", message.header.id.sender, message.header.recipient);
+}
+
+std::vector<Message> World::receive(NodeId recipient)
+{
+    auto incoming = transport_.receive(recipient);
+    for (const auto& message : incoming) {
+        logMessage(message, "msg_receive", recipient, recipient);
+    }
+    return incoming;
 }
 
 } // namespace fleetlink

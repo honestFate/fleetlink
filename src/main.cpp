@@ -1,41 +1,9 @@
 #include "fleetlink/world.hpp"
 
-#include <nlohmann/json.hpp>
-
 #include <exception>
 #include <iostream>
-#include <string>
+#include <memory>
 #include <string_view>
-
-namespace {
-
-const char* eventName(fleetlink::ZoneEventKind kind)
-{
-    if (kind == fleetlink::ZoneEventKind::REQUEST) {
-        return "zone_request";
-    }
-    if (kind == fleetlink::ZoneEventKind::ENTER) {
-        return "zone_enter";
-    }
-    return "zone_leave";
-}
-
-void printTrace(const std::vector<fleetlink::ZoneEvent>& events)
-{
-    for (const auto& event : events) {
-        const nlohmann::json row{
-            {"tick", event.tick},
-            {"node", "M" + std::to_string(event.machine)},
-            {"lvl", "INFO"},
-            {"ev", eventName(event.kind)},
-            {"zone", event.resource == fleetlink::ResourceId::LOADING_BUFFER ? "LOADING_BUFFER"
-                                                                             : "UNLOADING_BUFFER"},
-        };
-        std::cout << row.dump() << '\n';
-    }
-}
-
-} // namespace
 
 int main(int argc, char** argv)
 {
@@ -50,13 +18,17 @@ int main(int argc, char** argv)
     }
 
     try {
-        fleetlink::World world;
+        std::unique_ptr<fleetlink::Logger> logger;
+        if (trace) {
+            logger = std::make_unique<fleetlink::Logger>(std::cout, fleetlink::LogLevel::TRACE);
+        }
+        fleetlink::World world({0, 1, 2, 3, 4, 5}, {}, logger.get());
         for (const auto& machine : world.snapshot()) {
             world.dispatch(machine.id, fleetlink::MissionTarget::LOAD);
         }
         world.step(2000);
-        if (trace) {
-            printTrace(world.events());
+        if (logger) {
+            logger->close();
         }
 
         auto& report = trace ? std::cerr : std::cout;
