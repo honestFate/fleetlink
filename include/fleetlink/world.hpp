@@ -99,6 +99,7 @@ private:
     SequenceNumber arm_sequence_ = 0;
     LamportTime arm_clock_ = 0;
     Tick retry_interval_;
+    unsigned zone_capacity_;
     std::map<MachineId, Message> pending_missions_;
     std::vector<ZoneEvent> events_;
     StopController arm_control_;

@@ -15,19 +15,20 @@ struct HeartbeatConfig {
     Tick timeout = 200;
 };
 
-// Local Ricart-Agrawala state for one machine and buffers of capacity one
+// Local permission state for bounded buffers and exclusive service equipment
 class AccessProtocol {
 public:
     // The configured roster includes this machine and excludes ARM
     AccessProtocol(MachineId id, std::vector<MachineId> members, Tick retry_interval = 50,
-                   Logger* logger = nullptr, HeartbeatConfig heartbeat = {});
+                   Logger* logger = nullptr, HeartbeatConfig heartbeat = {},
+                   unsigned zone_capacity = 1);
 
-    // Only one buffer may be requested or held at a time
+    // Acquire one buffer, then its service resource
     RequestId request(ResourceId resource, Tick tick);
-    // Call only after physically leaving the buffer
+    // Call after physically releasing equipment or leaving a buffer, in that order
     void release(ResourceId resource, Tick tick);
     // Cancel only before physical entry, including a permission obtained on this tick
-    void cancel(Tick tick);
+    void cancel(ResourceId resource, Tick tick);
     void onMessage(const Message& message, Tick tick);
     // Run after incoming messages so an arriving reply can cancel a retry
     void retry(Tick tick);
@@ -58,30 +59,34 @@ private:
         std::optional<SequenceNumber> sequence;
         bool active = true;
     };
+    struct ResourceState {
+        unsigned capacity = 1;
+        Tick last_request_tick = 0;
+        std::optional<Request> request;
+        bool granted = false;
+        std::set<MachineId> replies;
+        std::map<MachineId, PeerRequest> peer_requests;
+    };
 
     void onRequest(const Message& message, Tick tick);
     bool onReply(MachineId sender, const Reply& reply);
     void closePeerRequest(const RequestId& request);
     void onHeartbeat(MachineId peer, const Heartbeat& heartbeat, Tick tick);
-    void updatePermission();
-    void replyDeferred(Tick tick);
+    void updatePermission(ResourceState& state);
+    void replyDeferred(ResourceState& state, Tick tick);
     void logPeer(const char* event, MachineId peer, Tick tick, LogLevel level);
     void logMessage(const char* event, const Message& message, Tick tick);
 
     MachineId id_;
     std::vector<MachineId> members_;
     Tick retry_interval_;
-    Tick last_request_tick_ = 0;
     Logger* logger_;
     HeartbeatConfig heartbeat_;
     Tick last_heartbeat_tick_ = 0;
     std::map<MachineId, PeerHealth> peers_;
     LamportTime clock_ = 0;
     SequenceNumber sequence_ = 0;
-    std::optional<Request> request_;
-    bool granted_ = false;
-    std::set<MachineId> replies_;
-    std::map<MachineId, PeerRequest> peer_requests_;
+    std::map<ResourceId, ResourceState> resources_;
     std::vector<Message> outgoing_;
 };
 

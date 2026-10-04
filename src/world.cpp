@@ -50,6 +50,7 @@ World::World(std::vector<MachineId> members, MachineConfig config, Logger* logge
              ChannelConfig channel)
     : logger_(logger), members_(validatedMembers(std::move(members))),
       transport_(transportNodes(members_), channel, logger), retry_interval_(config.retry_interval),
+      zone_capacity_(config.zone_capacity),
       arm_control_(ARM_NODE_ID, transportNodes(members_), config.retry_interval)
 {
     for (const auto id : members_) {
@@ -131,7 +132,9 @@ void World::step(Tick ticks)
             }
             for (const auto& message : messages) {
                 if (const auto* request = std::get_if<Request>(&message.payload)) {
-                    if (request->id.sequence == message.header.id.sequence &&
+                    const bool buffer = request->id.resource == ResourceId::LOADING_BUFFER ||
+                                        request->id.resource == ResourceId::UNLOADING_BUFFER;
+                    if (buffer && request->id.sequence == message.header.id.sequence &&
                         state_before != MachineState::WAIT_PERMIT) {
                         recordZone(id, ZoneEventKind::REQUEST, request->id.resource);
                     }
@@ -213,21 +216,29 @@ void World::checkOccupancy() const
 {
     unsigned loading_count = 0;
     unsigned unloading_count = 0;
+    unsigned loading_service = 0;
+    unsigned unloading_service = 0;
     for (const auto& [id, record] : machines_) {
         const auto buffer = record.machine.occupiedBuffer();
         loading_count += buffer == ResourceId::LOADING_BUFFER;
         unloading_count += buffer == ResourceId::UNLOADING_BUFFER;
+        loading_service += record.machine.state() == MachineState::LOADING;
+        unloading_service += record.machine.state() == MachineState::UNLOADING;
     }
-    if (loading_count > 1 || unloading_count > 1) {
+    if (loading_count > zone_capacity_ || unloading_count > zone_capacity_ || loading_service > 1 ||
+        unloading_service > 1) {
         if (logger_) {
             logger_->log({tick_,
                           "WORLD",
                           LogLevel::ERROR,
                           "capacity_violation",
                           {{"loading", std::uint64_t{loading_count}},
-                           {"unloading", std::uint64_t{unloading_count}}}});
+                           {"unloading", std::uint64_t{unloading_count}},
+                           {"capacity", std::uint64_t{zone_capacity_}},
+                           {"loading_service", std::uint64_t{loading_service}},
+                           {"unloading_service", std::uint64_t{unloading_service}}}});
         }
-        throw std::logic_error("Buffer capacity exceeded at tick " + std::to_string(tick_));
+        throw std::logic_error("Resource capacity exceeded at tick " + std::to_string(tick_));
     }
 }
 

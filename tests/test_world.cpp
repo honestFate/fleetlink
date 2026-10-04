@@ -256,7 +256,8 @@ TEST_CASE("asynchronous logs preserve every zone event and do not affect the mod
     std::istringstream input(output.str());
     for (std::string line; std::getline(input, line);) {
         const auto row = nlohmann::json::parse(line);
-        if (row.at("ev") == "telemetry") {
+        if (row.at("ev") == "telemetry" || row.at("ev") == "service_start" ||
+            row.at("ev") == "service_finish") {
             continue;
         }
         CHECK(row.at("lvl") == "INFO");

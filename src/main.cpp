@@ -14,11 +14,12 @@ namespace {
 
 void usage(std::ostream& output)
 {
-    output << "Usage: fleetlink_demo [--scenario S1|S2|S3|S4] [--seed N] [--trace]\n"
+    output << "Usage: fleetlink_demo [--scenario S1|S2|S3|S4] [--seed N] [--k N] [--trace]\n"
            << "S1: 2000 ticks, clean channel; S2: 5000 ticks, loss=0.2, delay=1..10, dup=0.05\n"
            << "S3: S2 with M3 failing while waiting at the start of tick 1000\n"
            << "S4: S2 with ARM offline during ticks 800..1000\n"
-           << "All scenarios run 6 machines with k=1, default scenario S1 and seed 42\n"
+           << "All scenarios run 6 machines; defaults: k=1, scenario S1, seed 42\n"
+           << "--k sets a positive capacity for each buffer; service capacity stays 1\n"
            << "--trace writes JSONL events to stdout and the report to stderr\n";
 }
 
@@ -29,6 +30,7 @@ int main(int argc, char** argv)
     bool trace = false;
     std::string_view scenario = "S1";
     std::uint64_t seed = 42;
+    unsigned capacity = 1;
     for (int index = 1; index < argc; ++index) {
         const std::string_view option(argv[index]);
         if (option == "--help") {
@@ -39,7 +41,7 @@ int main(int argc, char** argv)
             trace = true;
             continue;
         }
-        if ((option == "--scenario" || option == "--seed") && index + 1 < argc) {
+        if ((option == "--scenario" || option == "--seed" || option == "--k") && index + 1 < argc) {
             const std::string_view value(argv[++index]);
             if (option == "--scenario" &&
                 (value == "S1" || value == "S2" || value == "S3" || value == "S4")) {
@@ -50,6 +52,14 @@ int main(int argc, char** argv)
                 const auto parsed =
                     std::from_chars(value.data(), value.data() + value.size(), seed);
                 if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size()) {
+                    continue;
+                }
+            }
+            if (option == "--k") {
+                const auto parsed =
+                    std::from_chars(value.data(), value.data() + value.size(), capacity);
+                if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
+                    capacity > 0) {
                     continue;
                 }
             }
@@ -71,7 +81,9 @@ int main(int argc, char** argv)
         if (trace) {
             logger = std::make_unique<fleetlink::Logger>(std::cout, fleetlink::LogLevel::TRACE);
         }
-        fleetlink::World world({0, 1, 2, 3, 4, 5}, {}, logger.get(), channel);
+        fleetlink::MachineConfig config;
+        config.zone_capacity = capacity;
+        fleetlink::World world({0, 1, 2, 3, 4, 5}, config, logger.get(), channel);
         for (const auto& machine : world.snapshot()) {
             world.dispatch(machine.id, fleetlink::MissionTarget::LOAD);
         }
@@ -83,7 +95,7 @@ int main(int argc, char** argv)
             before_failure = world.snapshot();
             if (before_failure.at(3).state != fleetlink::MachineState::WAIT_PERMIT) {
                 throw std::runtime_error(
-                    "S3 requires M3 to be waiting for permission at tick 1000 for this seed");
+                    "S3 requires M3 to be waiting for permission at tick 1000 for this seed and k");
             }
             world.failAt(3, 1000);
             world.step(4001);
@@ -107,8 +119,8 @@ int main(int argc, char** argv)
         }
 
         auto& report = trace ? std::cerr : std::cout;
-        report << scenario << ": 6 machines, " << world.currentTick()
-               << " ticks, k=1, seed=" << seed << '\n';
+        report << scenario << ": 6 machines, " << world.currentTick() << " ticks, k=" << capacity
+               << ", seed=" << seed << '\n';
         bool progressed = arm_recovered && outage_progress;
         for (const auto& machine : world.snapshot()) {
             report << "M" << machine.id << ": loads=" << machine.completed_loads

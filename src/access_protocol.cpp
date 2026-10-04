@@ -17,12 +17,12 @@ bool isBuffer(ResourceId resource)
 } // namespace
 
 AccessProtocol::AccessProtocol(MachineId id, std::vector<MachineId> members, Tick retry_interval,
-                               Logger* logger, HeartbeatConfig heartbeat)
+                               Logger* logger, HeartbeatConfig heartbeat, unsigned zone_capacity)
     : id_(id), members_(std::move(members)), retry_interval_(retry_interval), logger_(logger),
       heartbeat_(heartbeat)
 {
-    if (retry_interval_ == 0) {
-        throw std::invalid_argument("Retry interval must be positive");
+    if (retry_interval_ == 0 || zone_capacity == 0) {
+        throw std::invalid_argument("Retry interval and buffer capacity must be positive");
     }
     if (heartbeat_.interval == 0 || heartbeat_.timeout <= heartbeat_.interval) {
         throw std::invalid_argument("Heartbeat timeout must exceed a positive interval");
@@ -39,51 +39,73 @@ AccessProtocol::AccessProtocol(MachineId id, std::vector<MachineId> members, Tic
             peers_.emplace(peer, PeerHealth{});
         }
     }
+    for (const auto resource : {ResourceId::LOADING_BUFFER, ResourceId::UNLOADING_BUFFER,
+                                ResourceId::LOADING_SERVICE, ResourceId::UNLOADING_SERVICE}) {
+        resources_[resource].capacity = isBuffer(resource) ? zone_capacity : 1;
+    }
 }
 
 RequestId AccessProtocol::request(ResourceId resource, Tick tick)
 {
-    if (!isBuffer(resource)) {
-        throw std::invalid_argument("Access protocol supports buffers only");
+    if (!resources_.count(resource)) {
+        throw std::invalid_argument("Unknown resource");
     }
-    if (request_) {
+    if (isBuffer(resource) && (resources_.at(ResourceId::LOADING_BUFFER).request ||
+                               resources_.at(ResourceId::UNLOADING_BUFFER).request)) {
         throw std::logic_error("Release the current buffer before requesting another");
+    }
+    const auto buffer = resource == ResourceId::LOADING_SERVICE ? ResourceId::LOADING_BUFFER
+                                                                : ResourceId::UNLOADING_BUFFER;
+    auto& state = resources_.at(resource);
+    if (state.request || (!isBuffer(resource) && !hasPermission(buffer))) {
+        throw std::logic_error("Service requires its buffer and no existing service request");
     }
 
     const auto header = makeHeader(tick);
     const Request attempt{{resource, id_, header.id.sequence}, header.clock};
     outgoing_.push_back({header, attempt});
-    request_ = attempt;
-    last_request_tick_ = tick;
-    replies_.clear();
-    granted_ = false;
-    updatePermission();
+    state.request = attempt;
+    state.last_request_tick = tick;
+    state.replies.clear();
+    state.granted = false;
+    updatePermission(state);
     return attempt.id;
 }
 
 void AccessProtocol::release(ResourceId resource, Tick tick)
 {
     if (!hasPermission(resource)) {
-        throw std::logic_error("Cannot release a buffer without its permission");
+        throw std::logic_error("Cannot release a resource without its permission");
     }
-
-    outgoing_.push_back({makeHeader(tick), Release{request_->id}});
-    replyDeferred(tick);
-    replies_.clear();
-    request_.reset();
-    granted_ = false;
+    const auto service = resource == ResourceId::LOADING_BUFFER ? ResourceId::LOADING_SERVICE
+                                                                : ResourceId::UNLOADING_SERVICE;
+    if (isBuffer(resource) && resources_.at(service).request) {
+        throw std::logic_error("Release service before its buffer");
+    }
+    auto& state = resources_.at(resource);
+    outgoing_.push_back({makeHeader(tick), Release{state.request->id}});
+    replyDeferred(state, tick);
+    state.replies.clear();
+    state.request.reset();
+    state.granted = false;
 }
 
-void AccessProtocol::cancel(Tick tick)
+void AccessProtocol::cancel(ResourceId resource, Tick tick)
 {
-    if (!request_) {
+    auto& state = resources_.at(resource);
+    if (!state.request) {
         return;
     }
-    outgoing_.push_back({makeHeader(tick), Cancel{request_->id}});
-    replyDeferred(tick);
-    replies_.clear();
-    request_.reset();
-    granted_ = false;
+    const auto service = resource == ResourceId::LOADING_BUFFER ? ResourceId::LOADING_SERVICE
+                                                                : ResourceId::UNLOADING_SERVICE;
+    if (isBuffer(resource) && resources_.at(service).request) {
+        throw std::logic_error("Cancel service before its buffer");
+    }
+    outgoing_.push_back({makeHeader(tick), Cancel{state.request->id}});
+    replyDeferred(state, tick);
+    state.replies.clear();
+    state.request.reset();
+    state.granted = false;
 }
 
 Message AccessProtocol::send(MessagePayload payload, Tick tick, std::optional<NodeId> recipient)
@@ -117,15 +139,16 @@ void AccessProtocol::onMessage(const Message& message, Tick tick)
         if (!peer) {
             return;
         }
-        if (request && (request->id.requester != sender || !isBuffer(request->id.resource))) {
+        if (request &&
+            (request->id.requester != sender || !resources_.count(request->id.resource))) {
             return;
         }
-        if (release &&
-            (release->request.requester != sender || !isBuffer(release->request.resource))) {
+        if (release && (release->request.requester != sender ||
+                        !resources_.count(release->request.resource))) {
             return;
         }
         if (cancel &&
-            (cancel->request.requester != sender || !isBuffer(cancel->request.resource))) {
+            (cancel->request.requester != sender || !resources_.count(cancel->request.resource))) {
             return;
         }
     } else if (!peer && sender != ARM_NODE_ID) {
@@ -161,11 +184,15 @@ void AccessProtocol::tick(Tick now)
             now - health.last_seen > heartbeat_.timeout) {
             logPeer("peer_suspected", peer, now, LogLevel::WARN);
             health.active = false;
-            replies_.erase(peer);
+            for (auto& [resource, state] : resources_) {
+                state.replies.erase(peer);
+            }
             logPeer("peer_excluded", peer, now, LogLevel::WARN);
         }
     }
-    updatePermission();
+    for (auto& [resource, state] : resources_) {
+        updatePermission(state);
+    }
     if (now >= last_heartbeat_tick_ && now - last_heartbeat_tick_ >= heartbeat_.interval) {
         const auto header = makeHeader(now);
         outgoing_.push_back({header, Heartbeat{header.id.sequence}});
@@ -182,13 +209,15 @@ bool AccessProtocol::isActive(MachineId peer) const noexcept
 
 void AccessProtocol::retry(Tick tick)
 {
-    if (!request_ || granted_ || tick < last_request_tick_ ||
-        tick - last_request_tick_ < retry_interval_) {
-        return;
+    for (auto& [resource, state] : resources_) {
+        if (!state.request || state.granted || tick < state.last_request_tick ||
+            tick - state.last_request_tick < retry_interval_) {
+            continue;
+        }
+        outgoing_.push_back({makeHeader(tick), *state.request});
+        state.last_request_tick = tick;
+        logMessage("request_retry", outgoing_.back(), tick);
     }
-    outgoing_.push_back({makeHeader(tick), *request_});
-    last_request_tick_ = tick;
-    logMessage("request_retry", outgoing_.back(), tick);
 }
 
 void AccessProtocol::acknowledge(MessageId message, Tick tick)
@@ -198,12 +227,14 @@ void AccessProtocol::acknowledge(MessageId message, Tick tick)
 
 bool AccessProtocol::isWaiting(ResourceId resource) const noexcept
 {
-    return request_ && request_->id.resource == resource && !granted_;
+    const auto found = resources_.find(resource);
+    return found != resources_.end() && found->second.request && !found->second.granted;
 }
 
 bool AccessProtocol::hasPermission(ResourceId resource) const noexcept
 {
-    return request_ && request_->id.resource == resource && granted_;
+    const auto found = resources_.find(resource);
+    return found != resources_.end() && found->second.request && found->second.granted;
 }
 
 std::vector<Message> AccessProtocol::takeOutgoing()
@@ -228,8 +259,9 @@ void AccessProtocol::onRequest(const Message& message, Tick tick)
 {
     const auto& request = std::get<Request>(message.payload);
     const auto peer = request.id.requester;
-    const auto known = peer_requests_.find(peer);
-    if (known != peer_requests_.end() && request.id.sequence <= known->second.id.sequence) {
+    auto& state = resources_.at(request.id.resource);
+    const auto known = state.peer_requests.find(peer);
+    if (known != state.peer_requests.end() && request.id.sequence <= known->second.id.sequence) {
         const auto& previous = known->second;
         if (!(request.id == previous.id) || previous.released ||
             request.timestamp != previous.timestamp) {
@@ -243,11 +275,10 @@ void AccessProtocol::onRequest(const Message& message, Tick tick)
             return;
         }
     } else {
-        peer_requests_.insert_or_assign(peer, PeerRequest{request.id, request.timestamp});
+        state.peer_requests.insert_or_assign(peer, PeerRequest{request.id, request.timestamp});
     }
-    auto& remembered = peer_requests_.at(peer);
-    const bool same_resource = request_ && request_->id.resource == request.id.resource;
-    if (same_resource && (granted_ || requestKey(*request_) < requestKey(request))) {
+    auto& remembered = state.peer_requests.at(peer);
+    if (state.request && (state.granted || requestKey(*state.request) < requestKey(request))) {
         return;
     }
     outgoing_.push_back({makeHeader(tick, peer), Reply{request.id}});
@@ -256,35 +287,44 @@ void AccessProtocol::onRequest(const Message& message, Tick tick)
 
 bool AccessProtocol::onReply(MachineId sender, const Reply& reply)
 {
-    if (!request_ || granted_ || !(reply.request == request_->id)) {
+    const auto found = resources_.find(reply.request.resource);
+    if (found == resources_.end()) {
         return false;
     }
-    const bool accepted = replies_.insert(sender).second;
-    updatePermission();
+    auto& state = found->second;
+    if (!state.request || state.granted || !(reply.request == state.request->id)) {
+        return false;
+    }
+    const bool accepted = state.replies.insert(sender).second;
+    updatePermission(state);
     return accepted;
 }
 
 void AccessProtocol::closePeerRequest(const RequestId& request)
 {
     const auto peer = request.requester;
-    const auto known = peer_requests_.find(peer);
-    if (known == peer_requests_.end() || request.sequence >= known->second.id.sequence) {
-        peer_requests_.insert_or_assign(peer, PeerRequest{request, 0, false, true});
+    auto& state = resources_.at(request.resource);
+    const auto known = state.peer_requests.find(peer);
+    if (known == state.peer_requests.end() || request.sequence >= known->second.id.sequence) {
+        state.peer_requests.insert_or_assign(peer, PeerRequest{request, 0, false, true});
     }
 }
 
-void AccessProtocol::updatePermission()
+void AccessProtocol::updatePermission(ResourceState& state)
 {
-    if (request_ && !granted_) {
-        granted_ = std::all_of(peers_.begin(), peers_.end(), [this](const auto& peer) {
-            return !peer.second.active || replies_.count(peer.first) != 0;
-        });
+    if (state.request && !state.granted) {
+        const auto missing =
+            std::count_if(peers_.begin(), peers_.end(), [&state](const auto& peer) {
+                return peer.second.active && !state.replies.count(peer.first);
+            });
+        // At most capacity - 1 active peers may still withhold their replies
+        state.granted = static_cast<std::size_t>(missing) < state.capacity;
     }
 }
 
-void AccessProtocol::replyDeferred(Tick tick)
+void AccessProtocol::replyDeferred(ResourceState& state, Tick tick)
 {
-    for (auto& [peer, attempt] : peer_requests_) {
+    for (auto& [peer, attempt] : state.peer_requests) {
         if (isActive(peer) && !attempt.replied && !attempt.released) {
             outgoing_.push_back({makeHeader(tick, peer), Reply{attempt.id}});
             attempt.replied = true;
@@ -306,13 +346,12 @@ void AccessProtocol::onHeartbeat(MachineId peer, const Heartbeat& heartbeat, Tic
     }
     health.active = true;
     logPeer("peer_returned", peer, tick, LogLevel::WARN);
-    if (request_ && !granted_) {
-        const auto resource = request_->id.resource;
-        outgoing_.push_back({makeHeader(tick), Cancel{request_->id}});
-        replyDeferred(tick);
-        request_.reset();
-        request(resource, tick);
-        logMessage("request_restart", outgoing_.back(), tick);
+    for (auto& [resource, state] : resources_) {
+        if (state.request && !state.granted) {
+            cancel(resource, tick);
+            request(resource, tick);
+            logMessage("request_restart", outgoing_.back(), tick);
+        }
     }
 }
 

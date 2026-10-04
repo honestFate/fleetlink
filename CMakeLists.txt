@@ -59,6 +59,7 @@ if(FLEETLINK_BUILD_TESTS)
         tests/test_messages.cpp
         tests/test_transport.cpp
         tests/test_protocol.cpp
+        tests/test_capacity.cpp
         tests/test_world.cpp
     )
     target_link_libraries(fleetlink_tests PRIVATE fleetlink_core doctest::doctest
@@ -71,6 +72,7 @@ if(FLEETLINK_BUILD_TESTS)
     add_test(NAME fleetlink_demo_s3 COMMAND fleetlink_demo --scenario S3)
     add_test(NAME fleetlink_demo_s3_trace COMMAND fleetlink_demo --scenario S3 --trace)
     add_test(NAME fleetlink_demo_s4 COMMAND fleetlink_demo --scenario S4)
+    add_test(NAME fleetlink_demo_k3 COMMAND fleetlink_demo --scenario S2 --k 3)
 endif()
 
 # --- Python-модуль ------------------------------------------------------------

@@ -24,7 +24,8 @@ Machine::Machine(MachineId id, std::vector<MachineId> members, MachineConfig con
     : id_(id), machine_class_(machine_class), position_(config.initial_position),
       load_(config.initial_load), config_(config), logger_(logger),
       control_(id, controlNodes(members), config.retry_interval),
-      protocol_(id, std::move(members), config.retry_interval, logger, config.heartbeat)
+      protocol_(id, std::move(members), config.retry_interval, logger, config.heartbeat,
+                config.zone_capacity)
 {
     if (config_.road_length <= 0 || config_.speed <= 0 || config_.loading_rate <= 0 ||
         config_.loading_rate > 100 || config_.unloading_rate <= 0 || config_.unloading_rate > 100 ||
@@ -97,7 +98,26 @@ void Machine::execute(Tick now)
         return;
     }
     if (state_ == MachineState::IN_ZONE) {
+        // With k = 1, exclusive buffer ownership already guarantees exclusive service
+        if (config_.zone_capacity > 1) {
+            if (!protocol_.isWaiting(targetService()) &&
+                !protocol_.hasPermission(targetService())) {
+                protocol_.request(targetService(), now);
+                return;
+            }
+            if (!protocol_.hasPermission(targetService())) {
+                return;
+            }
+        }
         state_ = target_ == MissionTarget::LOAD ? MachineState::LOADING : MachineState::UNLOADING;
+        if (logger_) {
+            logger_->log(
+                {now,
+                 nodeName(id_),
+                 LogLevel::INFO,
+                 "service_start",
+                 {{"operation", std::string(target_ == MissionTarget::LOAD ? "load" : "dump")}}});
+        }
     }
     if (state_ == MachineState::LOADING || state_ == MachineState::UNLOADING) {
         service(now);
@@ -121,7 +141,10 @@ std::vector<Message> Machine::setHalted(bool stopped, Tick now)
 void Machine::applyStop(Tick now, bool previously_halted)
 {
     if (halted() && !occupied_buffer_) {
-        protocol_.cancel(now);
+        protocol_.cancel(targetBuffer(), now);
+    }
+    if (halted() && state_ == MachineState::IN_ZONE) {
+        protocol_.cancel(targetService(), now);
     }
     if (logger_ && previously_halted != halted()) {
         logger_->log({now,
@@ -144,6 +167,12 @@ ResourceId Machine::targetBuffer() const noexcept
 {
     return target_ == MissionTarget::LOAD ? ResourceId::LOADING_BUFFER
                                           : ResourceId::UNLOADING_BUFFER;
+}
+
+ResourceId Machine::targetService() const noexcept
+{
+    return target_ == MissionTarget::LOAD ? ResourceId::LOADING_SERVICE
+                                          : ResourceId::UNLOADING_SERVICE;
 }
 
 void Machine::onMission(const Message& message, Tick now)
@@ -192,6 +221,17 @@ void Machine::service(Tick now)
     }
 
     const auto released = *occupied_buffer_;
+    if (logger_) {
+        logger_->log(
+            {now,
+             nodeName(id_),
+             LogLevel::INFO,
+             "service_finish",
+             {{"operation", std::string(target_ == MissionTarget::LOAD ? "load" : "dump")}}});
+    }
+    if (config_.zone_capacity > 1) {
+        protocol_.release(targetService(), now);
+    }
     occupied_buffer_.reset();
     state_ = MachineState::EN_ROUTE;
     protocol_.release(released, now);

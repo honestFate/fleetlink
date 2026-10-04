@@ -131,7 +131,10 @@ TEST_CASE("protocol validates membership and permits a lone machine immediately"
     CHECK_THROWS_AS(AccessProtocol(1, {1, 2, 1}), std::invalid_argument);
 
     AccessProtocol node(0, {0});
-    CHECK_THROWS_AS(node.request(ResourceId::LOADING_SERVICE, 0), std::invalid_argument);
+    // Deliberately malformed input to verify resource validation
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    CHECK_THROWS_AS(node.request(static_cast<ResourceId>(99), 0), std::invalid_argument);
+    CHECK_THROWS_AS(node.request(ResourceId::LOADING_SERVICE, 0), std::logic_error);
     CHECK_FALSE(node.isWaiting(loading));
     CHECK_FALSE(node.hasPermission(loading));
     const auto first = node.request(loading, 0);
@@ -293,7 +296,9 @@ TEST_CASE("foreign requests and ARM protocol messages cannot create deferred per
     node.onMessage(incoming, 1);
     incoming.header.id.sender = 1;
     node.onMessage(incoming, 1);
-    incoming = requestFrom(2, 1, 1, ResourceId::LOADING_SERVICE);
+    // Deliberately malformed input to verify message validation
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    incoming = requestFrom(2, 1, 1, static_cast<ResourceId>(99));
     node.onMessage(incoming, 1);
     incoming = requestFrom(2, 1, 1);
     std::get<Request>(incoming.payload).id.requester = 1;

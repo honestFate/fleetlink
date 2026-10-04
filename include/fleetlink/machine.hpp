@@ -18,6 +18,7 @@ struct MachineConfig {
     Tick retry_interval = 50;
     HeartbeatConfig heartbeat;
     Tick telemetry_interval = 10;
+    unsigned zone_capacity = 1;
 };
 
 class Machine {
@@ -48,6 +49,7 @@ public:
 
 private:
     ResourceId targetBuffer() const noexcept;
+    ResourceId targetService() const noexcept;
     void onMission(const Message& message, Tick now);
     void move(Tick now);
     void service(Tick now);
