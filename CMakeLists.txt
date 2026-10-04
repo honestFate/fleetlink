@@ -20,6 +20,7 @@ add_subdirectory(third_party)
 # --- ядро ---------------------------------------------------------------------
 add_library(fleetlink_core SHARED
     src/machine.cpp
+    src/access_protocol.cpp
     src/messages.cpp
     src/transport.cpp
     src/logger.cpp
