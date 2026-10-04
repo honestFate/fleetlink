@@ -310,3 +310,36 @@ TEST_CASE("dirty delivery is seeded independent of send order and can reorder me
     CHECK(run(42, false) == reference);
     CHECK(run(43, false) != reference);
 }
+
+TEST_CASE(
+    "disconnection drops new traffic and in-flight inbound copies but not already sent packets")
+{
+    InMemoryTransport channel({1, 2, 3}, {42, 0, 5, 5, 1});
+    channel.send(request(1, 1, 0, 2));
+    channel.send(request(2, 1, 0, 1));
+    channel.advanceTo(1);
+    CHECK_THROWS_AS(channel.disconnect(99), std::invalid_argument);
+    channel.disconnect(2);
+    channel.disconnect(2);
+    channel.send(request(2, 2, 1, 1));
+    channel.send(request(1, 2, 1, 2));
+    channel.advanceTo(5);
+    CHECK(channel.receive(2).empty());
+    CHECK(ids(channel.receive(1)) == std::vector<MessageId>{{2, 1}, {2, 1}});
+    CHECK(channel.counters().sent == 4);
+    CHECK(channel.counters().duplicates == 2);
+    CHECK(channel.counters().lost == 4);
+    CHECK(channel.counters().delivered == 2);
+    CHECK(channel.counters().sent + channel.counters().duplicates ==
+          channel.counters().lost + channel.counters().delivered);
+}
+
+TEST_CASE("disconnection clears messages that were delivered but not consumed")
+{
+    InMemoryTransport channel({1, 2});
+    channel.send(request(1, 1, 0, 2));
+    channel.advanceTo(1);
+    channel.disconnect(2);
+    CHECK(channel.receive(2).empty());
+    CHECK(channel.counters().delivered == 1);
+}

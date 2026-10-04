@@ -80,10 +80,15 @@ void InMemoryTransport::send(const Message& message)
     deliveryTick(current_tick_, config_.delay_max);
     for (const auto recipient : recipients) {
         ++counters_.sent;
+        if (disconnected_.count(message.header.id.sender) || disconnected_.count(recipient)) {
+            ++counters_.lost;
+            logDelivery({current_tick_, recipient, message}, "msg_drop", LogLevel::WARN, "offline");
+            continue;
+        }
         auto random = deliveryRandom(config_.seed, message, recipient);
         if (chance(random, config_.loss)) {
             ++counters_.lost;
-            logDelivery({current_tick_, recipient, message}, "msg_drop", LogLevel::WARN);
+            logDelivery({current_tick_, recipient, message}, "msg_drop", LogLevel::WARN, "loss");
             continue;
         }
         const bool duplicate = chance(random, config_.dup);
@@ -141,6 +146,11 @@ void InMemoryTransport::advanceTo(Tick tick)
                      [tick](const auto& delivery) { return delivery.tick > tick; });
     current_tick_ = tick;
     for (auto delivery = pending_.begin(); delivery != waiting; ++delivery) {
+        if (disconnected_.count(delivery->recipient)) {
+            ++counters_.lost;
+            logDelivery(*delivery, "msg_drop", LogLevel::WARN, "offline");
+            continue;
+        }
         inboxes_.at(delivery->recipient).push_back(delivery->message);
         ++counters_.delivered;
         logDelivery(*delivery, "msg_deliver", LogLevel::TRACE);
@@ -148,8 +158,18 @@ void InMemoryTransport::advanceTo(Tick tick)
     pending_.erase(pending_.begin(), waiting);
 }
 
+void InMemoryTransport::disconnect(NodeId node)
+{
+    const auto inbox = inboxes_.find(node);
+    if (inbox == inboxes_.end()) {
+        throw std::invalid_argument("Unknown node to disconnect");
+    }
+    disconnected_.insert(node);
+    inbox->second.clear();
+}
+
 void InMemoryTransport::logDelivery(const PendingDelivery& delivery, const char* event,
-                                    LogLevel level)
+                                    LogLevel level, const char* reason)
 {
     if (logger_ && logger_->enabled(level)) {
         logger_->log({current_tick_,
@@ -161,7 +181,8 @@ void InMemoryTransport::logDelivery(const PendingDelivery& delivery, const char*
                        {"seq", delivery.message.header.id.sequence},
                        {"sent_tick", delivery.message.header.sent_tick},
                        {"delivery_tick", delivery.tick},
-                       {"copy", std::uint64_t{delivery.copy}}}});
+                       {"copy", std::uint64_t{delivery.copy}},
+                       {"reason", std::string(reason)}}});
     }
 }
 

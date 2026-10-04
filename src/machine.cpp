@@ -14,7 +14,7 @@ Machine::Machine(MachineId id, std::vector<MachineId> members, MachineConfig con
                  MachineClass machine_class, Logger* logger)
     : id_(id), machine_class_(machine_class), position_(config.initial_position),
       load_(config.initial_load), config_(config),
-      protocol_(id, std::move(members), config.retry_interval, logger)
+      protocol_(id, std::move(members), config.retry_interval, logger, config.heartbeat)
 {
     if (config_.road_length <= 0 || config_.speed <= 0 || config_.loading_rate <= 0 ||
         config_.loading_rate > 100 || config_.unloading_rate <= 0 || config_.unloading_rate > 100 ||
@@ -29,12 +29,15 @@ std::vector<Message> Machine::tick(Tick now, const std::vector<Message>& incomin
         throw std::invalid_argument("Machine ticks must be consecutive");
     }
     last_tick_ = now;
+    if (state_ == MachineState::FAULT) {
+        return {};
+    }
 
     for (const auto& message : incoming) {
         protocol_.onMessage(message, now);
         onMission(message, now);
     }
-    protocol_.retry(now);
+    protocol_.tick(now);
     if (state_ == MachineState::IDLE && pending_target_) {
         target_ = *pending_target_;
         pending_target_.reset();
@@ -59,6 +62,14 @@ std::vector<Message> Machine::tick(Tick now, const std::vector<Message>& incomin
         service(now);
     }
     return protocol_.takeOutgoing();
+}
+
+void Machine::fail() noexcept
+{
+    state_ = MachineState::FAULT;
+    connected_ = false;
+    occupied_buffer_.reset();
+    pending_target_.reset();
 }
 
 ResourceId Machine::targetBuffer() const noexcept

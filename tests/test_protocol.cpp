@@ -486,3 +486,183 @@ TEST_CASE("old requests cannot replace newer deferred attempts or resurrect rele
     node.onMessage(requestFrom(2, 30, 60), 11);
     REQUIRE(node.takeOutgoing().size() == 1);
 }
+
+TEST_CASE("heartbeats are periodic and keep increasing in idle waiting and held states")
+{
+    AccessProtocol node(1, {1, 2}, 50, nullptr, {5, 200});
+    node.tick(4);
+    CHECK(node.takeOutgoing().empty());
+    node.tick(5);
+    auto outgoing = node.takeOutgoing();
+    REQUIRE(outgoing.size() == 1);
+    REQUIRE(messageKind(outgoing.front()) == MessageKind::HEARTBEAT);
+    const auto first = std::get<Heartbeat>(outgoing.front().payload).sequence;
+    CHECK_FALSE(outgoing.front().header.recipient.has_value());
+    const auto attempt = node.request(loading, 6);
+    node.takeOutgoing();
+    node.tick(9);
+    CHECK(node.takeOutgoing().empty());
+    node.tick(10);
+    outgoing = node.takeOutgoing();
+    REQUIRE(outgoing.size() == 1);
+    CHECK(std::get<Heartbeat>(outgoing.front().payload).sequence > first);
+    node.onMessage(replyFrom(2, attempt), 11);
+    REQUIRE(node.hasPermission(loading));
+    node.tick(15);
+    outgoing = node.takeOutgoing();
+    REQUIRE(outgoing.size() == 1);
+    CHECK(messageKind(outgoing.front()) == MessageKind::HEARTBEAT);
+    CHECK(node.hasPermission(loading));
+}
+
+TEST_CASE("failure detection has a startup grace and only new peer heartbeats refresh it")
+{
+    CHECK_THROWS_AS((AccessProtocol(1, {1, 2}, 50, nullptr, {0, 10})), std::invalid_argument);
+    CHECK_THROWS_AS((AccessProtocol(1, {1, 2}, 50, nullptr, {10, 10})), std::invalid_argument);
+    AccessProtocol node(1, {1, 2}, 50, nullptr, {2, 10});
+    const Message heartbeat{{{2, 10}, std::nullopt, 1, 10}, Heartbeat{10}};
+    node.tick(10);
+    CHECK(node.isActive(2));
+    node.tick(11);
+    CHECK_FALSE(node.isActive(2));
+    node.onMessage(heartbeat, 12);
+    CHECK(node.isActive(2));
+    node.onMessage(heartbeat, 20);
+    node.onMessage({{{2, 9}, std::nullopt, 1, 9}, Heartbeat{9}}, 21);
+    node.onMessage({{{2, 20}, std::nullopt, 21, 20}, Request{{loading, 2, 20}, 20}}, 22);
+    node.tick(22);
+    CHECK(node.isActive(2));
+    node.tick(23);
+    CHECK_FALSE(node.isActive(2));
+    node.onMessage(heartbeat, 24);
+    CHECK_FALSE(node.isActive(2));
+    node.onMessage({{{ARM_NODE_ID, 100}, NodeId{1}, 24, 100}, Heartbeat{100}}, 25);
+    CHECK_FALSE(node.isActive(2));
+    CHECK(node.isActive(1));
+    CHECK_FALSE(node.isActive(99));
+    node.onMessage({{{2, 11}, std::nullopt, 2, 11}, Heartbeat{11}}, 26);
+    CHECK(node.isActive(2));
+    node.tick(36);
+    CHECK(node.isActive(2));
+    node.tick(37);
+    CHECK_FALSE(node.isActive(2));
+}
+
+TEST_CASE("excluding a replied peer does not substitute for a missing live peer reply")
+{
+    AccessProtocol node(0, {0, 1, 2, 3}, 50, nullptr, {2, 10});
+    const auto attempt = node.request(loading, 0);
+    node.onMessage(replyFrom(1, attempt), 1);
+    node.onMessage(replyFrom(2, attempt), 1);
+    for (const MachineId peer : {2, 3}) {
+        node.onMessage({{{peer, 2}, std::nullopt, 5, 25}, Heartbeat{2}}, 5);
+    }
+    node.tick(11);
+    CHECK_FALSE(node.isActive(1));
+    CHECK(node.isActive(2));
+    CHECK(node.isActive(3));
+    CHECK(node.isWaiting(loading));
+    node.onMessage(replyFrom(3, attempt), 12);
+    CHECK(node.hasPermission(loading));
+}
+
+TEST_CASE("a missing unreplied peer is excluded and a waiting request can progress")
+{
+    AccessProtocol node(0, {0, 1, 2}, 50, nullptr, {2, 10});
+    const auto attempt = node.request(loading, 0);
+    node.onMessage(replyFrom(1, attempt), 1);
+    node.onMessage({{{1, 2}, std::nullopt, 5, 25}, Heartbeat{2}}, 5);
+    node.tick(10);
+    CHECK(node.isWaiting(loading));
+    node.tick(11);
+    CHECK_FALSE(node.isActive(2));
+    CHECK(node.hasPermission(loading));
+    node.release(loading, 12);
+    node.request(unloading, 12);
+    CHECK(node.isWaiting(unloading));
+}
+
+TEST_CASE("a returning peer restarts a pending attempt and old replies cannot grant it")
+{
+    AccessProtocol node(0, {0, 1, 2}, 50, nullptr, {2, 10});
+    const auto old = node.request(loading, 0);
+    node.onMessage(replyFrom(1, old), 1);
+    node.onMessage({{{2, 2}, std::nullopt, 5, 25}, Heartbeat{2}}, 5);
+    node.tick(11);
+    REQUIRE_FALSE(node.isActive(1));
+    REQUIRE(node.isWaiting(loading));
+    node.takeOutgoing();
+    node.onMessage({{{1, 3}, std::nullopt, 12, 30}, Heartbeat{3}}, 12);
+    CHECK(node.isActive(1));
+    const auto outgoing = node.takeOutgoing();
+    REQUIRE(outgoing.size() == 2);
+    REQUIRE(messageKind(outgoing[0]) == MessageKind::CANCEL);
+    CHECK(std::get<Cancel>(outgoing[0].payload).request == old);
+    REQUIRE(messageKind(outgoing[1]) == MessageKind::REQUEST);
+    const auto next = std::get<Request>(outgoing[1].payload).id;
+    CHECK(next.sequence > old.sequence);
+    node.onMessage(replyFrom(2, old), 13);
+    node.onMessage(replyFrom(1, old), 13);
+    CHECK(node.isWaiting(loading));
+    node.onMessage(replyFrom(2, next), 14);
+    CHECK(node.isWaiting(loading));
+    node.onMessage(replyFrom(1, next), 14);
+    CHECK(node.hasPermission(loading));
+}
+
+TEST_CASE("a returning peer does not release an already held resource")
+{
+    AccessProtocol node(0, {0, 1}, 50, nullptr, {2, 10});
+    node.request(loading, 0);
+    node.tick(11);
+    REQUIRE(node.hasPermission(loading));
+    node.takeOutgoing();
+    node.onMessage({{{1, 3}, std::nullopt, 12, 30}, Heartbeat{3}}, 12);
+    CHECK(node.isActive(1));
+    CHECK(node.hasPermission(loading));
+    CHECK(node.takeOutgoing().empty());
+    node.onMessage(requestFrom(1, 4, 31), 13);
+    CHECK(node.takeOutgoing().empty());
+    node.release(loading, 14);
+    REQUIRE(node.takeOutgoing().size() == 2);
+}
+
+TEST_CASE("CANCEL closes a deferred peer attempt without granting or releasing our resource")
+{
+    AccessProtocol node(0, {0, 1});
+    const auto own = node.request(loading, 0);
+    node.takeOutgoing();
+    node.onMessage(replyFrom(1, own), 1);
+    node.onMessage(requestFrom(1, 2, 30), 2);
+    node.onMessage({{{1, 3}, std::nullopt, 3, 31}, Cancel{{loading, 1, 2}}}, 3);
+    node.onMessage(requestFrom(1, 2, 30), 4);
+    CHECK(node.takeOutgoing().empty());
+    CHECK(node.hasPermission(loading));
+    node.release(loading, 5);
+    const auto outgoing = node.takeOutgoing();
+    REQUIRE(outgoing.size() == 1);
+    CHECK(messageKind(outgoing.front()) == MessageKind::RELEASE);
+}
+
+TEST_CASE("a returning waiter can recover a reply skipped while it was excluded")
+{
+    AccessProtocol node(0, {0, 1}, 50, nullptr, {2, 10});
+    const auto own = node.request(loading, 0);
+    node.onMessage(replyFrom(1, own), 1);
+    const auto waiting = requestFrom(1, 2, 30);
+    node.onMessage(waiting, 2);
+    node.tick(11);
+    REQUIRE_FALSE(node.isActive(1));
+    node.takeOutgoing();
+    node.release(loading, 12);
+    const auto released = node.takeOutgoing();
+    REQUIRE(released.size() == 1);
+    CHECK(messageKind(released.front()) == MessageKind::RELEASE);
+    node.onMessage({{{1, 3}, std::nullopt, 13, 31}, Heartbeat{3}}, 13);
+    node.onMessage(waiting, 14);
+    const auto recovered = node.takeOutgoing();
+    REQUIRE(recovered.size() == 1);
+    REQUIRE(messageKind(recovered.front()) == MessageKind::REPLY);
+    CHECK(std::get<Reply>(recovered.front().payload).request ==
+          std::get<Request>(waiting.payload).id);
+}

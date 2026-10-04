@@ -6,15 +6,18 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
+#include <vector>
 
 namespace {
 
 void usage(std::ostream& output)
 {
-    output << "Usage: fleetlink_demo [--scenario S1|S2] [--seed N] [--trace]\n"
+    output << "Usage: fleetlink_demo [--scenario S1|S2|S3] [--seed N] [--trace]\n"
            << "S1: 2000 ticks, clean channel; S2: 5000 ticks, loss=0.2, delay=1..10, dup=0.05\n"
-           << "Both scenarios run 6 machines with k=1, default scenario S1 and seed 42\n"
+           << "S3: S2 with M3 failing while waiting after tick 1000\n"
+           << "All scenarios run 6 machines with k=1, default scenario S1 and seed 42\n"
            << "--trace writes JSONL events to stdout and the report to stderr\n";
 }
 
@@ -37,7 +40,7 @@ int main(int argc, char** argv)
         }
         if ((option == "--scenario" || option == "--seed") && index + 1 < argc) {
             const std::string_view value(argv[++index]);
-            if (option == "--scenario" && (value == "S1" || value == "S2")) {
+            if (option == "--scenario" && (value == "S1" || value == "S2" || value == "S3")) {
                 scenario = value;
                 continue;
             }
@@ -56,7 +59,7 @@ int main(int argc, char** argv)
     try {
         fleetlink::ChannelConfig channel;
         channel.seed = seed;
-        if (scenario == "S2") {
+        if (scenario != "S1") {
             channel.loss = 0.2;
             channel.delay_min = 1;
             channel.delay_max = 10;
@@ -70,7 +73,19 @@ int main(int argc, char** argv)
         for (const auto& machine : world.snapshot()) {
             world.dispatch(machine.id, fleetlink::MissionTarget::LOAD);
         }
-        world.step(scenario == "S2" ? 5000 : 2000);
+        std::vector<fleetlink::MachineSnapshot> before_failure;
+        if (scenario == "S3") {
+            world.step(1000);
+            before_failure = world.snapshot();
+            if (before_failure.at(3).state != fleetlink::MachineState::WAIT_PERMIT) {
+                throw std::runtime_error(
+                    "S3 requires M3 to be waiting for permission at tick 1000 for this seed");
+            }
+            world.fail(3);
+            world.step(4000);
+        } else {
+            world.step(scenario == "S2" ? 5000 : 2000);
+        }
         if (logger) {
             logger->close();
         }
@@ -82,7 +97,23 @@ int main(int argc, char** argv)
         for (const auto& machine : world.snapshot()) {
             report << "M" << machine.id << ": loads=" << machine.completed_loads
                    << ", unloads=" << machine.completed_unloads << '\n';
-            progressed = progressed && machine.completed_loads > 0 && machine.completed_unloads > 0;
+            if (scenario == "S3") {
+                const auto& before = before_failure.at(machine.id);
+                if (machine.id == 3) {
+                    progressed = progressed && !machine.on_route &&
+                                 machine.completed_loads == before.completed_loads &&
+                                 machine.completed_unloads == before.completed_unloads;
+                    report << "  Permanently failed at tick 1000\n";
+                } else {
+                    const auto loads = machine.completed_loads - before.completed_loads;
+                    const auto unloads = machine.completed_unloads - before.completed_unloads;
+                    report << "  After failure: loads=" << loads << ", unloads=" << unloads << '\n';
+                    progressed = progressed && loads > 0 && unloads > 0;
+                }
+            } else {
+                progressed =
+                    progressed && machine.completed_loads > 0 && machine.completed_unloads > 0;
+            }
         }
         std::map<fleetlink::MachineId, fleetlink::Tick> waiting;
         fleetlink::Tick max_wait = 0;
@@ -92,6 +123,11 @@ int main(int argc, char** argv)
             } else if (event.kind == fleetlink::ZoneEventKind::ENTER) {
                 max_wait = std::max(max_wait, event.tick - waiting.at(event.machine));
                 waiting.erase(event.machine);
+            }
+        }
+        for (const auto& machine : world.snapshot()) {
+            if (!machine.on_route) {
+                waiting.erase(machine.id);
             }
         }
         const auto& counters = world.channelCounters();

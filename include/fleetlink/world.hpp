@@ -16,6 +16,7 @@ struct MachineSnapshot {
     std::int64_t position;
     int load;
     bool connected;
+    bool on_route;
     std::optional<ResourceId> occupied_buffer;
     std::uint64_t completed_loads;
     std::uint64_t completed_unloads;
@@ -25,6 +26,7 @@ enum class ZoneEventKind {
     REQUEST,
     ENTER,
     LEAVE,
+    REMOVE,
 };
 
 struct ZoneEvent {
@@ -43,6 +45,8 @@ public:
     // Send an addressed MISSION through the same transport as peer messages
     void dispatch(MachineId id, MissionTarget target);
     void step(Tick ticks = 1);
+    // Inject a permanent physical failure at the current tick, without notifying peers
+    void fail(MachineId id);
 
     Tick currentTick() const noexcept { return tick_; }
     // Actual model state, independent of ARM telemetry

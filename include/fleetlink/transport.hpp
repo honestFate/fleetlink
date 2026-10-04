@@ -4,6 +4,7 @@
 #include "fleetlink/messages.hpp"
 
 #include <map>
+#include <set>
 #include <vector>
 
 namespace fleetlink {
@@ -35,6 +36,8 @@ public:
 
     // Called by the simulation, not exposed through the machine's interface
     void advanceTo(Tick tick);
+    // A permanently failed endpoint cannot send or receive, packets already sent may arrive
+    void disconnect(NodeId node);
     const ChannelCounters& counters() const noexcept { return counters_; }
 
 private:
@@ -45,7 +48,8 @@ private:
         unsigned copy = 0;
     };
 
-    void logDelivery(const PendingDelivery& delivery, const char* event, LogLevel level);
+    void logDelivery(const PendingDelivery& delivery, const char* event, LogLevel level,
+                     const char* reason = "channel");
 
     Tick current_tick_ = 0;
     ChannelConfig config_;
@@ -54,6 +58,7 @@ private:
     std::vector<NodeId> nodes_;
     std::vector<PendingDelivery> pending_;
     std::map<NodeId, std::vector<Message>> inboxes_;
+    std::set<NodeId> disconnected_;
 };
 
 } // namespace fleetlink

@@ -66,6 +66,8 @@ if(FLEETLINK_BUILD_TESTS)
     add_test(NAME fleetlink_demo_trace COMMAND fleetlink_demo --trace)
     add_test(NAME fleetlink_demo_s2 COMMAND fleetlink_demo --scenario S2)
     add_test(NAME fleetlink_demo_s2_trace COMMAND fleetlink_demo --scenario S2 --trace)
+    add_test(NAME fleetlink_demo_s3 COMMAND fleetlink_demo --scenario S3)
+    add_test(NAME fleetlink_demo_s3_trace COMMAND fleetlink_demo --scenario S3 --trace)
 endif()
 
 # --- Python-модуль ------------------------------------------------------------

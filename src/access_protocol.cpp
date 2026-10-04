@@ -17,11 +17,15 @@ bool isBuffer(ResourceId resource)
 } // namespace
 
 AccessProtocol::AccessProtocol(MachineId id, std::vector<MachineId> members, Tick retry_interval,
-                               Logger* logger)
-    : id_(id), members_(std::move(members)), retry_interval_(retry_interval), logger_(logger)
+                               Logger* logger, HeartbeatConfig heartbeat)
+    : id_(id), members_(std::move(members)), retry_interval_(retry_interval), logger_(logger),
+      heartbeat_(heartbeat)
 {
     if (retry_interval_ == 0) {
         throw std::invalid_argument("Retry interval must be positive");
+    }
+    if (heartbeat_.interval == 0 || heartbeat_.timeout <= heartbeat_.interval) {
+        throw std::invalid_argument("Heartbeat timeout must exceed a positive interval");
     }
     std::sort(members_.begin(), members_.end());
     if (std::adjacent_find(members_.begin(), members_.end()) != members_.end()) {
@@ -29,6 +33,11 @@ AccessProtocol::AccessProtocol(MachineId id, std::vector<MachineId> members, Tic
     }
     if (!std::binary_search(members_.begin(), members_.end(), id_)) {
         throw std::invalid_argument("Protocol membership must include this machine");
+    }
+    for (const auto peer : members_) {
+        if (peer != id_) {
+            peers_.emplace(peer, PeerHealth{});
+        }
     }
 }
 
@@ -47,7 +56,8 @@ RequestId AccessProtocol::request(ResourceId resource, Tick tick)
     request_ = attempt;
     last_request_tick_ = tick;
     replies_.clear();
-    granted_ = members_.size() == 1;
+    granted_ = false;
+    updatePermission();
     return attempt.id;
 }
 
@@ -58,12 +68,7 @@ void AccessProtocol::release(ResourceId resource, Tick tick)
     }
 
     outgoing_.push_back({makeHeader(tick), Release{request_->id}});
-    for (auto& [peer, attempt] : peer_requests_) {
-        if (!attempt.replied && !attempt.released) {
-            outgoing_.push_back({makeHeader(tick, peer), Reply{attempt.id}});
-            attempt.replied = true;
-        }
-    }
+    replyDeferred(tick);
     replies_.clear();
     request_.reset();
     granted_ = false;
@@ -79,7 +84,9 @@ void AccessProtocol::onMessage(const Message& message, Tick tick)
     const auto* request = std::get_if<Request>(&message.payload);
     const auto* reply = std::get_if<Reply>(&message.payload);
     const auto* release = std::get_if<Release>(&message.payload);
-    if (request || reply || release) {
+    const auto* cancel = std::get_if<Cancel>(&message.payload);
+    const auto* heartbeat = std::get_if<Heartbeat>(&message.payload);
+    if (request || reply || release || cancel || heartbeat) {
         if (!peer) {
             return;
         }
@@ -90,11 +97,22 @@ void AccessProtocol::onMessage(const Message& message, Tick tick)
             (release->request.requester != sender || !isBuffer(release->request.resource))) {
             return;
         }
+        if (cancel &&
+            (cancel->request.requester != sender || !isBuffer(cancel->request.resource))) {
+            return;
+        }
     } else if (!peer && sender != ARM_NODE_ID) {
         return;
     }
 
     clock_ = nextLamportTime(clock_, message.header.clock);
+    if (heartbeat) {
+        onHeartbeat(static_cast<MachineId>(sender), *heartbeat, tick);
+        return;
+    }
+    if (peer && !isActive(static_cast<MachineId>(sender))) {
+        return;
+    }
     if (request) {
         onRequest(message, tick);
     } else if (reply) {
@@ -102,9 +120,37 @@ void AccessProtocol::onMessage(const Message& message, Tick tick)
             logMessage("reply_ignored", message, tick);
         }
     } else if (release) {
-        onRelease(*release);
+        closePeerRequest(release->request);
+    } else if (cancel) {
+        closePeerRequest(cancel->request);
     }
     // RELEASE is informational and never substitutes for a matching REPLY
+}
+
+void AccessProtocol::tick(Tick now)
+{
+    for (auto& [peer, health] : peers_) {
+        if (health.active && now > health.last_seen &&
+            now - health.last_seen > heartbeat_.timeout) {
+            logPeer("peer_suspected", peer, now, LogLevel::WARN);
+            health.active = false;
+            replies_.erase(peer);
+            logPeer("peer_excluded", peer, now, LogLevel::WARN);
+        }
+    }
+    updatePermission();
+    if (now >= last_heartbeat_tick_ && now - last_heartbeat_tick_ >= heartbeat_.interval) {
+        const auto header = makeHeader(now);
+        outgoing_.push_back({header, Heartbeat{header.id.sequence}});
+        last_heartbeat_tick_ = now;
+    }
+    retry(now);
+}
+
+bool AccessProtocol::isActive(MachineId peer) const noexcept
+{
+    const auto found = peers_.find(peer);
+    return peer == id_ || (found != peers_.end() && found->second.active);
 }
 
 void AccessProtocol::retry(Tick tick)
@@ -167,12 +213,12 @@ void AccessProtocol::onRequest(const Message& message, Tick tick)
         logMessage("request_repeat", message, tick);
         if (previous.replied) {
             outgoing_.push_back({makeHeader(tick, peer), Reply{request.id}});
+            return;
         }
-        return;
+    } else {
+        peer_requests_.insert_or_assign(peer, PeerRequest{request.id, request.timestamp});
     }
-    auto& remembered =
-        peer_requests_.insert_or_assign(peer, PeerRequest{request.id, request.timestamp})
-            .first->second;
+    auto& remembered = peer_requests_.at(peer);
     const bool same_resource = request_ && request_->id.resource == request.id.resource;
     if (same_resource && (granted_ || requestKey(*request_) < requestKey(request))) {
         return;
@@ -187,16 +233,74 @@ bool AccessProtocol::onReply(MachineId sender, const Reply& reply)
         return false;
     }
     const bool accepted = replies_.insert(sender).second;
-    granted_ = replies_.size() == members_.size() - 1;
+    updatePermission();
     return accepted;
 }
 
-void AccessProtocol::onRelease(const Release& release)
+void AccessProtocol::closePeerRequest(const RequestId& request)
 {
-    const auto peer = release.request.requester;
+    const auto peer = request.requester;
     const auto known = peer_requests_.find(peer);
-    if (known == peer_requests_.end() || release.request.sequence >= known->second.id.sequence) {
-        peer_requests_.insert_or_assign(peer, PeerRequest{release.request, 0, false, true});
+    if (known == peer_requests_.end() || request.sequence >= known->second.id.sequence) {
+        peer_requests_.insert_or_assign(peer, PeerRequest{request, 0, false, true});
+    }
+}
+
+void AccessProtocol::updatePermission()
+{
+    if (request_ && !granted_) {
+        granted_ = std::all_of(peers_.begin(), peers_.end(), [this](const auto& peer) {
+            return !peer.second.active || replies_.count(peer.first) != 0;
+        });
+    }
+}
+
+void AccessProtocol::replyDeferred(Tick tick)
+{
+    for (auto& [peer, attempt] : peer_requests_) {
+        if (isActive(peer) && !attempt.replied && !attempt.released) {
+            outgoing_.push_back({makeHeader(tick, peer), Reply{attempt.id}});
+            attempt.replied = true;
+        }
+    }
+}
+
+void AccessProtocol::onHeartbeat(MachineId peer, const Heartbeat& heartbeat, Tick tick)
+{
+    auto& health = peers_.at(peer);
+    if (health.sequence && heartbeat.sequence <= *health.sequence) {
+        logPeer("heartbeat_ignored", peer, tick, LogLevel::TRACE);
+        return;
+    }
+    health.sequence = heartbeat.sequence;
+    health.last_seen = tick;
+    if (health.active) {
+        return;
+    }
+    health.active = true;
+    logPeer("peer_returned", peer, tick, LogLevel::WARN);
+    if (request_ && !granted_) {
+        const auto resource = request_->id.resource;
+        outgoing_.push_back({makeHeader(tick), Cancel{request_->id}});
+        replyDeferred(tick);
+        request_.reset();
+        request(resource, tick);
+        logMessage("request_restart", outgoing_.back(), tick);
+    }
+}
+
+void AccessProtocol::logPeer(const char* event, MachineId peer, Tick tick, LogLevel level)
+{
+    if (logger_ && logger_->enabled(level)) {
+        const auto& health = peers_.at(peer);
+        logger_->log({tick,
+                      nodeName(id_),
+                      level,
+                      event,
+                      {{"peer", nodeName(peer)},
+                       {"last_seen", health.last_seen},
+                       {"heartbeat_seq", health.sequence.value_or(0)},
+                       {"timeout", heartbeat_.timeout}}});
     }
 }
 

@@ -39,12 +39,13 @@ std::vector<NodeId> transportNodes(const std::vector<MachineId>& members)
     return nodes;
 }
 
-// Cycle tests inspect resource messages separately from mission acknowledgements
-std::vector<Message> withoutAcks(std::vector<Message> messages)
+// Cycle tests inspect resource messages separately from acknowledgements and heartbeats
+std::vector<Message> resourceMessages(std::vector<Message> messages)
 {
     messages.erase(std::remove_if(messages.begin(), messages.end(),
                                   [](const auto& message) {
-                                      return messageKind(message) == MessageKind::ACK;
+                                      return messageKind(message) == MessageKind::ACK ||
+                                             messageKind(message) == MessageKind::HEARTBEAT;
                                   }),
                    messages.end());
     return messages;
@@ -52,7 +53,7 @@ std::vector<Message> withoutAcks(std::vector<Message> messages)
 
 std::vector<Message> tickMachine(Machine& machine, Tick tick, const std::vector<Message>& incoming)
 {
-    return withoutAcks(machine.tick(tick, incoming));
+    return resourceMessages(machine.tick(tick, incoming));
 }
 
 // A small test driver that exchanges all messages through the real transport
@@ -97,7 +98,7 @@ public:
             channel_.send(message);
         }
         channel_.receive(ARM_NODE_ID);
-        return withoutAcks(std::move(outgoing));
+        return resourceMessages(std::move(outgoing));
     }
 
 private:
@@ -545,4 +546,75 @@ TEST_CASE("missions are acknowledged again after ACK loss but executed only once
     CHECK(outgoing[0].header.id.sequence != outgoing[1].header.id.sequence);
     CHECK(machine.state() == MachineState::EN_ROUTE);
     CHECK(machine.position() > 0);
+}
+
+TEST_CASE("permanent failure removes physical occupancy and stops every machine activity")
+{
+    Machine machine(1);
+    Tick now = 0;
+    SUBCASE("idle")
+    {}
+    SUBCASE("moving")
+    {
+        machine.tick(++now, {missionFor(1, MissionTarget::DUMP)});
+    }
+    SUBCASE("permission obtained before physical entry")
+    {
+        machine.tick(++now, {missionFor(1, MissionTarget::LOAD)});
+        REQUIRE(machine.state() == MachineState::WAIT_PERMIT);
+    }
+    SUBCASE("inside buffer")
+    {
+        machine.tick(++now, {missionFor(1, MissionTarget::LOAD)});
+        machine.tick(++now, {});
+        REQUIRE(machine.occupiedBuffer() == loading);
+    }
+    SUBCASE("during service")
+    {
+        machine.tick(++now, {missionFor(1, MissionTarget::LOAD)});
+        machine.tick(++now, {});
+        machine.tick(++now, {});
+        REQUIRE(machine.load() == 20);
+    }
+    const auto position = machine.position();
+    const auto load = machine.load();
+    machine.fail();
+    machine.fail();
+    CHECK(machine.state() == MachineState::FAULT);
+    CHECK_FALSE(machine.connected());
+    CHECK_FALSE(machine.onRoute());
+    CHECK_FALSE(machine.occupiedBuffer().has_value());
+    for (unsigned step = 0; step < 20; ++step) {
+        CHECK(machine.tick(++now, {missionFor(1, MissionTarget::LOAD, 2), requestFrom(2, loading)})
+                  .empty());
+        CHECK(machine.position() == position);
+        CHECK(machine.load() == load);
+        CHECK(machine.state() == MachineState::FAULT);
+    }
+}
+
+TEST_CASE("known limitation: falsely excluding a live holder can exceed physical capacity")
+{
+    MachineConfig config;
+    config.loading_rate = 1;
+    config.heartbeat = {2, 10};
+    Machine holder(1, std::vector<MachineId>{1, 2}, config);
+    Machine waiter(2, std::vector<MachineId>{1, 2}, config);
+    const auto requested = tickMachine(holder, 1, {missionFor(1, MissionTarget::LOAD)});
+    const auto permission = tickMachine(waiter, 1, requested);
+    tickMachine(holder, 2, permission);
+    REQUIRE(holder.occupiedBuffer() == loading);
+    const auto waiting = tickMachine(waiter, 2, {missionFor(2, MissionTarget::LOAD)});
+    tickMachine(holder, 3, waiting);
+    tickMachine(waiter, 3, {});
+    // Simulate a link that loses all subsequent traffic, without physically failing either node
+    for (Tick now = 4; now <= 11; ++now) {
+        holder.tick(now, {});
+        waiter.tick(now, {});
+    }
+    CHECK(holder.onRoute());
+    CHECK(waiter.onRoute());
+    CHECK(holder.occupiedBuffer() == loading);
+    CHECK(waiter.occupiedBuffer() == loading);
+    CHECK(holder.load() < 100);
 }

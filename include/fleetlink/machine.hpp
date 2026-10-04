@@ -15,6 +15,7 @@ struct MachineConfig {
     std::int64_t initial_position = 0;
     int initial_load = 0;
     Tick retry_interval = 50;
+    HeartbeatConfig heartbeat;
 };
 
 class Machine {
@@ -27,6 +28,8 @@ public:
     // Process one tick and return messages for the simulation's send phase
     // Tick values must be consecutive after the first call
     std::vector<Message> tick(Tick now, const std::vector<Message>& incoming);
+    // Permanent physical failure, no RELEASE or other peer notification
+    void fail() noexcept;
 
     MachineId id() const noexcept { return id_; }
     MachineClass machineClass() const noexcept { return machine_class_; }
@@ -34,6 +37,7 @@ public:
     std::int64_t position() const noexcept { return position_; }
     int load() const noexcept { return load_; }
     bool connected() const noexcept { return connected_; }
+    bool onRoute() const noexcept { return state_ != MachineState::FAULT; }
     // Physical occupancy, separate from the protocol's permission to enter
     std::optional<ResourceId> occupiedBuffer() const noexcept { return occupied_buffer_; }
 

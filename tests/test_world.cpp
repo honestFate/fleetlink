@@ -48,6 +48,7 @@ void checkSnapshots(const World& left, const World& right)
         CHECK(lhs[index].position == rhs[index].position);
         CHECK(lhs[index].load == rhs[index].load);
         CHECK(lhs[index].connected == rhs[index].connected);
+        CHECK(lhs[index].on_route == rhs[index].on_route);
         CHECK(lhs[index].occupied_buffer == rhs[index].occupied_buffer);
         CHECK(lhs[index].completed_loads == rhs[index].completed_loads);
         CHECK(lhs[index].completed_unloads == rhs[index].completed_unloads);
@@ -447,21 +448,144 @@ TEST_CASE("a completely lost mission is retried but cannot start a machine out o
     world.step(150);
     logger.close();
     CHECK(world.events().empty());
-    CHECK(world.channelCounters().sent == 4);
-    CHECK(world.channelCounters().lost == 4);
+    CHECK(world.channelCounters().sent > 4);
+    CHECK(world.channelCounters().lost == world.channelCounters().sent);
     CHECK(world.channelCounters().delivered == 0);
     for (const auto& machine : world.snapshot()) {
         CHECK(machine.state == MachineState::IDLE);
     }
     std::istringstream input(output.str());
     std::vector<Tick> retries;
+    unsigned missions = 0;
     for (std::string line; std::getline(input, line);) {
         const auto row = nlohmann::json::parse(line);
+        if (row.at("ev") == "msg_send" && row.at("kind") == "MISSION") {
+            ++missions;
+        }
         if (row.at("ev") == "mission_retry") {
             CHECK(row.at("seq") == 1);
             CHECK(row.at("mission_seq") == 1);
             retries.push_back(row.at("tick").get<Tick>());
         }
     }
+    CHECK(missions == 4);
     CHECK(retries == std::vector<Tick>{50, 100, 150});
+}
+
+TEST_CASE("S3 detects M3 locally and all survivors progress after detection")
+{
+    std::ostringstream output;
+    Logger logger(output, LogLevel::TRACE);
+    const ChannelConfig channel{42, 0.2, 1, 10, 0.05};
+    World first({0, 1, 2, 3, 4, 5}, {}, &logger, channel);
+    World permuted({5, 2, 4, 1, 3, 0}, {}, nullptr, channel);
+    dispatchAll(first);
+    dispatchAll(permuted);
+    first.step(1000);
+    permuted.step(1000);
+    REQUIRE(first.snapshot()[3].state == MachineState::WAIT_PERMIT);
+    const auto failed_before = first.snapshot()[3];
+    first.fail(3);
+    permuted.fail(3);
+    first.step(211);
+    permuted.step(211);
+    const auto after_detection = first.snapshot();
+    first.step(3789);
+    permuted.step(3789);
+    logger.close();
+    checkSnapshots(first, permuted);
+    CHECK(eventKeys(first) == eventKeys(permuted));
+
+    for (const auto& machine : first.snapshot()) {
+        if (machine.id == 3) {
+            CHECK(machine.state == MachineState::FAULT);
+            CHECK_FALSE(machine.connected);
+            CHECK_FALSE(machine.on_route);
+            CHECK_FALSE(machine.occupied_buffer.has_value());
+            CHECK(machine.completed_loads == failed_before.completed_loads);
+            CHECK(machine.completed_unloads == failed_before.completed_unloads);
+        } else {
+            CHECK(machine.completed_loads > after_detection.at(machine.id).completed_loads);
+            CHECK(machine.completed_unloads > after_detection.at(machine.id).completed_unloads);
+        }
+    }
+    std::map<ResourceId, std::set<MachineId>> inside;
+    ZoneEventKind last_m3 = ZoneEventKind::LEAVE;
+    for (const auto& event : first.events()) {
+        if (event.machine == 3) {
+            CHECK(event.tick <= 1000);
+            last_m3 = event.kind;
+        }
+        if (event.kind == ZoneEventKind::ENTER) {
+            CHECK(inside[event.resource].empty());
+            CHECK(inside[event.resource].insert(event.machine).second);
+        } else if (event.kind == ZoneEventKind::LEAVE) {
+            CHECK(inside[event.resource].erase(event.machine) == 1);
+        }
+        CHECK(inside[event.resource].size() <= 1);
+    }
+    CHECK(last_m3 == ZoneEventKind::REQUEST);
+
+    std::set<std::string> suspected;
+    std::set<std::string> excluded;
+    unsigned failures = 0;
+    std::istringstream input(output.str());
+    for (std::string line; std::getline(input, line);) {
+        const auto row = nlohmann::json::parse(line);
+        const auto event = row.at("ev").get<std::string>();
+        if (event == "peer_suspected" || event == "peer_excluded") {
+            CHECK(row.at("peer") == "M3");
+            CHECK(row.at("tick").get<Tick>() > 1000);
+            CHECK(row.at("tick").get<Tick>() <= 1211);
+            CHECK(row.at("tick").get<Tick>() - row.at("last_seen").get<Tick>() == 201);
+            auto& observers = event == "peer_suspected" ? suspected : excluded;
+            CHECK(observers.insert(row.at("node").get<std::string>()).second);
+        }
+        if (event == "machine_failed") {
+            ++failures;
+            CHECK(row.at("node") == "M3");
+            CHECK(row.at("tick") == 1000);
+            CHECK(row.at("from") == "WAIT_PERMIT");
+        }
+        CHECK(event != "peer_returned");
+        if (row.at("node") == "M3" && row.at("tick").get<Tick>() > 1000) {
+            FAIL("A permanently failed machine produced a new event");
+        }
+    }
+    CHECK(failures == 1);
+    CHECK(suspected == std::set<std::string>{"M0", "M1", "M2", "M4", "M5"});
+    CHECK(excluded == suspected);
+}
+
+TEST_CASE("a real failure inside a buffer removes occupancy without completing service")
+{
+    World world({0, 1, 2, 3});
+    dispatchAll(world);
+    world.step(4);
+    const auto before = world.snapshot()[0];
+    REQUIRE(before.occupied_buffer == ResourceId::LOADING_BUFFER);
+    REQUIRE(before.load == 20);
+    CHECK_THROWS_AS(world.fail(99), std::invalid_argument);
+    world.fail(0);
+    const auto removed = world.snapshot()[0];
+    CHECK_FALSE(removed.occupied_buffer.has_value());
+    CHECK_FALSE(removed.on_route);
+    CHECK(removed.completed_loads == 0);
+    CHECK(removed.load == before.load);
+    REQUIRE(world.events().back().kind == ZoneEventKind::REMOVE);
+    CHECK(world.events().back().tick == 4);
+    const auto event_count = world.events().size();
+    world.fail(0);
+    CHECK(world.events().size() == event_count);
+    world.step(400);
+    for (const auto& machine : world.snapshot()) {
+        if (machine.id == 0) {
+            CHECK(machine.completed_loads == 0);
+            CHECK(machine.completed_unloads == 0);
+            CHECK(machine.load == before.load);
+        } else {
+            CHECK(machine.completed_loads > 0);
+            CHECK(machine.completed_unloads > 0);
+        }
+    }
 }

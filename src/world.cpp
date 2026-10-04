@@ -100,6 +100,9 @@ void World::step(Tick ticks)
 
         std::vector<Message> outgoing;
         for (auto& [id, record] : machines_) {
+            if (!record.machine.onRoute()) {
+                continue;
+            }
             const auto before = record.machine.occupiedBuffer();
             const auto state_before = record.machine.state();
             const auto messages = record.machine.tick(tick_, receive(id));
@@ -119,7 +122,8 @@ void World::step(Tick ticks)
             }
             for (const auto& message : messages) {
                 if (const auto* request = std::get_if<Request>(&message.payload)) {
-                    if (request->id.sequence == message.header.id.sequence) {
+                    if (request->id.sequence == message.header.id.sequence &&
+                        state_before != MachineState::WAIT_PERMIT) {
                         recordZone(id, ZoneEventKind::REQUEST, request->id.resource);
                     }
                 }
@@ -151,10 +155,41 @@ std::vector<MachineSnapshot> World::snapshot() const
     for (const auto& [id, record] : machines_) {
         const auto& machine = record.machine;
         result.push_back({id, machine.machineClass(), machine.state(), machine.position(),
-                          machine.load(), machine.connected(), machine.occupiedBuffer(),
-                          record.completed_loads, record.completed_unloads});
+                          machine.load(), machine.connected(), machine.onRoute(),
+                          machine.occupiedBuffer(), record.completed_loads,
+                          record.completed_unloads});
     }
     return result;
+}
+
+void World::fail(MachineId id)
+{
+    const auto found = machines_.find(id);
+    if (found == machines_.end()) {
+        throw std::invalid_argument("Unknown machine id");
+    }
+    auto& machine = found->second.machine;
+    if (!machine.onRoute()) {
+        return;
+    }
+    const auto occupied = machine.occupiedBuffer();
+    const auto previous = machine.state();
+    transport_.disconnect(id);
+    machine.fail();
+    if (logger_) {
+        logger_->log({tick_,
+                      nodeName(id),
+                      LogLevel::WARN,
+                      "machine_failed",
+                      {{"from", stateName(previous)},
+                       {"pos", machine.position()},
+                       {"load", std::int64_t{machine.load()}},
+                       {"on_route", false}}});
+    }
+    if (occupied) {
+        recordZone(id, ZoneEventKind::REMOVE, *occupied);
+    }
+    checkOccupancy();
 }
 
 void World::checkOccupancy() const
@@ -183,7 +218,8 @@ void World::recordZone(MachineId id, ZoneEventKind kind, ResourceId resource)
 {
     events_.push_back({tick_, id, kind, resource});
     if (logger_) {
-        constexpr std::array<const char*, 3> names{"zone_request", "zone_enter", "zone_leave"};
+        constexpr std::array<const char*, 4> names{"zone_request", "zone_enter", "zone_leave",
+                                                   "zone_removed"};
         logger_->log({tick_,
                       nodeName(id),
                       LogLevel::INFO,
@@ -215,6 +251,7 @@ void World::logMessage(const Message& message, const char* event, NodeId node,
     const auto* request = std::get_if<Request>(&message.payload);
     const auto* reply = std::get_if<Reply>(&message.payload);
     const auto* release = std::get_if<Release>(&message.payload);
+    const auto* cancel = std::get_if<Cancel>(&message.payload);
     std::optional<RequestId> attempt;
     if (request) {
         attempt = request->id;
@@ -223,6 +260,8 @@ void World::logMessage(const Message& message, const char* event, NodeId node,
         attempt = reply->request;
     } else if (release) {
         attempt = release->request;
+    } else if (cancel) {
+        attempt = cancel->request;
     }
     if (attempt) {
         record.fields.emplace("zone", resourceName(attempt->resource));
@@ -237,6 +276,9 @@ void World::logMessage(const Message& message, const char* event, NodeId node,
     if (const auto* ack = std::get_if<Ack>(&message.payload)) {
         record.fields.emplace("ack_from", nodeName(ack->message.sender));
         record.fields.emplace("ack_seq", ack->message.sequence);
+    }
+    if (const auto* heartbeat = std::get_if<Heartbeat>(&message.payload)) {
+        record.fields.emplace("heartbeat_seq", heartbeat->sequence);
     }
     logger_->log(std::move(record));
 }
