@@ -288,3 +288,49 @@ TEST_CASE("additional fields cannot overwrite mandatory log metadata")
     REQUIRE(records.size() == 1);
     CHECK(records[0]["tick"] == 1);
 }
+
+TEST_CASE("flush publishes all preceding records without closing the logger")
+{
+    std::ostringstream output;
+    Logger logger(output);
+    logger.flush();
+    logger.log(record(1));
+    logger.flush();
+    REQUIRE(rows(output.str()).size() == 1);
+    logger.log(record(2));
+    logger.flush();
+    const auto records = rows(output.str());
+    REQUIRE(records.size() == 2);
+    CHECK(records[0]["tick"] == 1);
+    CHECK(records[1]["tick"] == 2);
+    logger.close();
+    CHECK_NOTHROW(logger.flush());
+}
+
+TEST_CASE("flush reports consumer failures instead of waiting forever")
+{
+    FailingBuffer buffer;
+    buffer.fail_flush = true;
+    std::ostream output(&buffer);
+    Logger logger(output);
+    logger.log(record(1));
+    CHECK_THROWS_AS(logger.flush(), std::runtime_error);
+}
+
+TEST_CASE("flush waits for a blocked consumer and leaves the logger usable")
+{
+    BlockingBuffer buffer;
+    auto entered = buffer.entered();
+    std::ostream output(&buffer);
+    Logger logger(output);
+    logger.log(record(1));
+    entered.wait();
+    auto flushing = std::async(std::launch::async, [&logger] { logger.flush(); });
+    CHECK(flushing.wait_for(std::chrono::milliseconds(10)) == std::future_status::timeout);
+    buffer.release();
+    flushing.get();
+    CHECK(rows(buffer.str()).size() == 1);
+    logger.log(record(2));
+    logger.close();
+    CHECK(rows(buffer.str()).size() == 2);
+}

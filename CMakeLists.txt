@@ -83,7 +83,7 @@ if(FLEETLINK_BUILD_PYTHON)
     # Имя цели НЕ должно совпадать с именем модуля — иначе коллизия имён в CMake.
     pybind11_add_module(fleetlink_py bindings/fleetlink_py.cpp)
     set_target_properties(fleetlink_py PROPERTIES OUTPUT_NAME fleetlink)
-    target_link_libraries(fleetlink_py PRIVATE fleetlink_core)
+    target_link_libraries(fleetlink_py PRIVATE fleetlink_core nlohmann_json::nlohmann_json)
 
     if(FLEETLINK_BUILD_TESTS)
         add_test(NAME fleetlink_python_import
@@ -91,6 +91,18 @@ if(FLEETLINK_BUILD_PYTHON)
                 "PYTHONPATH=$<TARGET_FILE_DIR:fleetlink_py>"
                 "${Python_EXECUTABLE}" -c "import fleetlink; fleetlink.Machine(1)"
         )
+        add_test(NAME fleetlink_python_tests
+            COMMAND ${CMAKE_COMMAND} -E env
+                "PYTHONPATH=$<TARGET_FILE_DIR:fleetlink_py>"
+                "FLEETLINK_NATIVE_DEMO=$<TARGET_FILE:fleetlink_demo>"
+                "${Python_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_python.py"
+        )
+        add_test(NAME fleetlink_python_demo
+            COMMAND ${CMAKE_COMMAND} -E env
+                "PYTHONPATH=$<TARGET_FILE_DIR:fleetlink_py>"
+                "${Python_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/demo.py"
+        )
+        set_tests_properties(fleetlink_python_tests fleetlink_python_demo PROPERTIES TIMEOUT 90)
     endif()
 endif()
 

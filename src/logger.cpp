@@ -62,8 +62,19 @@ void Logger::log(LogRecord record)
             return;
         }
         queue_.push_back(std::move(record));
+        ++submitted_;
     }
     ready_.notify_one();
+}
+
+void Logger::flush()
+{
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto target = submitted_;
+    flushed_.wait(lock, [this, target] { return written_ >= target || error_; });
+    if (error_) {
+        std::rethrow_exception(error_);
+    }
 }
 
 void Logger::close()
@@ -106,6 +117,11 @@ void Logger::consume() noexcept
             if (!output_) {
                 throw std::runtime_error("Failed to flush JSONL log");
             }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                written_ += batch.size();
+            }
+            flushed_.notify_all();
         }
         output_.flush();
         if (!output_) {
@@ -116,6 +132,7 @@ void Logger::consume() noexcept
         error_ = std::current_exception();
         closing_ = true;
         queue_.clear();
+        flushed_.notify_all();
     }
 }
 

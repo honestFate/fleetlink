@@ -45,6 +45,8 @@ public:
     bool enabled(LogLevel level) const noexcept { return level >= minimum_; }
     // Thread-safe enqueue, formatting and output happen in the consumer
     void log(LogRecord record);
+    // Wait until all records submitted before this call have been written and flushed
+    void flush();
     // Stop accepting records, drain, flush and join, then report any output error
     void close();
 
@@ -55,7 +57,10 @@ private:
     const LogLevel minimum_;
     std::mutex mutex_;
     std::condition_variable ready_;
+    std::condition_variable flushed_;
     std::deque<LogRecord> queue_;
+    std::uint64_t submitted_ = 0;
+    std::uint64_t written_ = 0;
     bool closing_ = false;
     std::exception_ptr error_;
     std::mutex close_mutex_;
