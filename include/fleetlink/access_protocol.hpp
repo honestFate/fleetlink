@@ -74,6 +74,7 @@ private:
     void onHeartbeat(MachineId peer, const Heartbeat& heartbeat, Tick tick);
     void updatePermission(ResourceState& state);
     void replyDeferred(ResourceState& state, Tick tick);
+    void finishRequest(ResourceState& state, Tick tick);
     void logPeer(const char* event, MachineId peer, Tick tick, LogLevel level);
     void logMessage(const char* event, const Message& message, Tick tick);
 

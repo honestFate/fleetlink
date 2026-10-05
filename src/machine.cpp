@@ -110,14 +110,7 @@ void Machine::execute(Tick now)
             }
         }
         state_ = target_ == MissionTarget::LOAD ? MachineState::LOADING : MachineState::UNLOADING;
-        if (logger_) {
-            logger_->log(
-                {now,
-                 nodeName(id_),
-                 LogLevel::INFO,
-                 "service_start",
-                 {{"operation", std::string(target_ == MissionTarget::LOAD ? "load" : "dump")}}});
-        }
+        logService("service_start", now);
     }
     if (state_ == MachineState::LOADING || state_ == MachineState::UNLOADING) {
         service(now);
@@ -221,14 +214,7 @@ void Machine::service(Tick now)
     }
 
     const auto released = *occupied_buffer_;
-    if (logger_) {
-        logger_->log(
-            {now,
-             nodeName(id_),
-             LogLevel::INFO,
-             "service_finish",
-             {{"operation", std::string(target_ == MissionTarget::LOAD ? "load" : "dump")}}});
-    }
+    logService("service_finish", now);
     if (config_.zone_capacity > 1) {
         protocol_.release(targetService(), now);
     }
@@ -238,6 +224,18 @@ void Machine::service(Tick now)
     const auto next = target_ == MissionTarget::LOAD ? MissionTarget::DUMP : MissionTarget::LOAD;
     target_ = pending_target_.value_or(next);
     pending_target_.reset();
+}
+
+void Machine::logService(const char* event, Tick now)
+{
+    if (logger_) {
+        logger_->log(
+            {now,
+             nodeName(id_),
+             LogLevel::INFO,
+             event,
+             {{"operation", std::string(target_ == MissionTarget::LOAD ? "load" : "dump")}}});
+    }
 }
 
 } // namespace fleetlink

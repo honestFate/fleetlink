@@ -84,10 +84,7 @@ void AccessProtocol::release(ResourceId resource, Tick tick)
     }
     auto& state = resources_.at(resource);
     outgoing_.push_back({makeHeader(tick), Release{state.request->id}});
-    replyDeferred(state, tick);
-    state.replies.clear();
-    state.request.reset();
-    state.granted = false;
+    finishRequest(state, tick);
 }
 
 void AccessProtocol::cancel(ResourceId resource, Tick tick)
@@ -102,6 +99,11 @@ void AccessProtocol::cancel(ResourceId resource, Tick tick)
         throw std::logic_error("Cancel service before its buffer");
     }
     outgoing_.push_back({makeHeader(tick), Cancel{state.request->id}});
+    finishRequest(state, tick);
+}
+
+void AccessProtocol::finishRequest(ResourceState& state, Tick tick)
+{
     replyDeferred(state, tick);
     state.replies.clear();
     state.request.reset();

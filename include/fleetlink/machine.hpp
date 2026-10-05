@@ -55,6 +55,7 @@ private:
     void service(Tick now);
     void execute(Tick now);
     void applyStop(Tick now, bool previously_halted);
+    void logService(const char* event, Tick now);
 
     MachineId id_;
     MachineClass machine_class_;

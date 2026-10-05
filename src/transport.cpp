@@ -5,6 +5,7 @@
 #include <limits>
 #include <random>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace fleetlink {
@@ -132,19 +133,11 @@ void InMemoryTransport::advanceTo(Tick tick)
     }
 
     std::sort(pending_.begin(), pending_.end(), [](const auto& lhs, const auto& rhs) {
-        if (lhs.tick != rhs.tick) {
-            return lhs.tick < rhs.tick;
-        }
-        if (messageBefore(lhs.message, rhs.message)) {
-            return true;
-        }
-        if (messageBefore(rhs.message, lhs.message)) {
-            return false;
-        }
-        if (lhs.recipient != rhs.recipient) {
-            return lhs.recipient < rhs.recipient;
-        }
-        return lhs.copy < rhs.copy;
+        const auto& left = lhs.message.header;
+        const auto& right = rhs.message.header;
+        return std::tie(lhs.tick, left.sent_tick, left.id.sender, left.id.sequence, lhs.recipient,
+                        lhs.copy) < std::tie(rhs.tick, right.sent_tick, right.id.sender,
+                                             right.id.sequence, rhs.recipient, rhs.copy);
     });
 
     const auto waiting =
