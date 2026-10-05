@@ -1,0 +1,31 @@
+Исходники: 49a799e2624735677b75572138a2cbe9f30c7361
+Дата: 2026-10-05
+
+Нативные S1/S2 и тесты flush, Debug, FLEETLINK_SANITIZER=thread, Python=OFF
+Вывод сохранён из успешных прогонов этих исходников перед созданием коммитов
+В этом WSL-окружении для запуска TSan требуется отключение ASLR через setarch
+Команда: setarch "$(uname -m)" -R ctest --test-dir build-tsan -R 'fleetlink_demo(_trace|_s2|_s2_trace)?$' --output-on-failure
+
+Internal ctest changing into directory: /home/default/fleetlink/build-tsan
+Test project /home/default/fleetlink/build-tsan
+    Start 2: fleetlink_demo
+1/4 Test #2: fleetlink_demo ...................   Passed    1.44 sec
+    Start 3: fleetlink_demo_trace
+2/4 Test #3: fleetlink_demo_trace .............   Passed    6.66 sec
+    Start 4: fleetlink_demo_s2
+3/4 Test #4: fleetlink_demo_s2 ................   Passed    2.94 sec
+    Start 5: fleetlink_demo_s2_trace
+4/4 Test #5: fleetlink_demo_s2_trace ..........   Passed   10.36 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =  21.43 sec
+
+Команда: setarch "$(uname -m)" -R ./build-tsan/fleetlink_tests --test-case='*flush*'
+
+[doctest] doctest version is "2.4.12"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  4 |  4 passed | 0 failed | 105 skipped
+[doctest] assertions: 18 | 18 passed | 0 failed |
+[doctest] Status: SUCCESS!

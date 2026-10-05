@@ -1,0 +1,45 @@
+Исходники: 49a799e2624735677b75572138a2cbe9f30c7361
+Дата: 2026-10-05
+
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Found Python: /usr/bin/python3.12 (found suitable version "3.12.3", minimum required is "3.8") found components: Interpreter Development.Module
+-- pybind11 v3.0.1
+-- Performing Test HAS_FLTO_AUTO
+-- Performing Test HAS_FLTO_AUTO - Success
+-- Configuring done (1.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/default/fleetlink/build-submission-check-yl23HQ/build
+[  9%] Building CXX object CMakeFiles/fleetlink_core.dir/src/access_protocol.cpp.o
+[  9%] Building CXX object CMakeFiles/fleetlink_core.dir/src/machine.cpp.o
+[ 13%] Building CXX object CMakeFiles/fleetlink_core.dir/src/stop_controller.cpp.o
+[ 18%] Building CXX object CMakeFiles/fleetlink_core.dir/src/messages.cpp.o
+[ 22%] Building CXX object CMakeFiles/fleetlink_core.dir/src/transport.cpp.o
+[ 27%] Building CXX object CMakeFiles/fleetlink_core.dir/src/logger.cpp.o
+[ 31%] Building CXX object CMakeFiles/fleetlink_core.dir/src/world.cpp.o
+[ 36%] Linking CXX shared library libfleetlink_core.so
+[ 36%] Built target fleetlink_core
+[ 40%] Building CXX object CMakeFiles/fleetlink_demo.dir/src/main.cpp.o
+[ 45%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/main.cpp.o
+[ 50%] Linking CXX executable fleetlink_demo
+[ 50%] Built target fleetlink_demo
+[ 54%] Building CXX object CMakeFiles/fleetlink_py.dir/bindings/fleetlink_py.cpp.o
+[ 59%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/test_logger.cpp.o
+[ 63%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/test_stop_controller.cpp.o
+[ 68%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/test_machine.cpp.o
+[ 72%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/test_messages.cpp.o
+[ 77%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/test_transport.cpp.o
+[ 81%] Linking CXX shared module fleetlink.cpython-312-x86_64-linux-gnu.so
+[ 81%] Built target fleetlink_py
+[ 86%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/test_protocol.cpp.o
+[ 90%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/test_capacity.cpp.o
+[ 95%] Building CXX object CMakeFiles/fleetlink_tests.dir/tests/test_world.cpp.o
+[100%] Linking CXX executable fleetlink_tests
+[100%] Built target fleetlink_tests

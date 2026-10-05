@@ -1,0 +1,84 @@
+Исходники: 49a799e2624735677b75572138a2cbe9f30c7361
+Дата: 2026-10-05
+
+12/12 Testing: fleetlink_python_demo
+12/12 Test: fleetlink_python_demo
+Command: "/home/default/fleetlink/.venv/lib/python3.12/site-packages/cmake/data/bin/cmake" "-E" "env" "PYTHONPATH=/home/default/fleetlink/build-submission-check-yl23HQ/build" "/usr/bin/python3.12" "/home/default/fleetlink/build-submission-check-yl23HQ/demo.py"
+Directory: /home/default/fleetlink/build-submission-check-yl23HQ/build
+"fleetlink_python_demo" start time: Oct 05 06:17 MSK
+Output:
+----------------------------------------------------------
+S1: 6 machines, 2000 ticks, k=1, seed=42
+M0: loads=56, unloads=55
+M1: loads=56, unloads=55
+M2: loads=56, unloads=55
+M3: loads=55, unloads=55
+M4: loads=55, unloads=55
+M5: loads=55, unloads=55
+Channel: sent=26905, delivered=26856, lost=0, duplicates=0
+Max completed wait: 32 ticks, still waiting: 1, max open wait: 3
+Capacity checks: PASS
+Progress: PASS
+S2: 6 machines, 5000 ticks, k=1, seed=42
+M0: loads=16, unloads=15
+M1: loads=15, unloads=15
+M2: loads=15, unloads=15
+M3: loads=15, unloads=15
+M4: loads=15, unloads=15
+M5: loads=15, unloads=15
+Channel: sent=46583, delivered=39229, lost=9166, duplicates=1872
+Max completed wait: 369 ticks, still waiting: 4, max open wait: 143
+Capacity checks: PASS
+Progress: PASS
+S3: 6 machines, 5000 ticks, k=1, seed=42
+M0: loads=16, unloads=16
+M1: loads=16, unloads=16
+M2: loads=16, unloads=15
+M3: loads=3, unloads=2
+M4: loads=16, unloads=15
+M5: loads=16, unloads=15
+Channel: sent=40029, delivered=29747, lost=11662, duplicates=1424
+Max completed wait: 412 ticks, still waiting: 5, max open wait: 162
+Capacity checks: PASS
+Progress: PASS
+S4: 6 machines, 5000 ticks, k=1, seed=42
+M0: loads=16, unloads=15
+M1: loads=15, unloads=15
+M2: loads=15, unloads=15
+M3: loads=15, unloads=15
+M4: loads=15, unloads=15
+M5: loads=15, unloads=15
+Channel: sent=46583, delivered=38881, lost=9499, duplicates=1857
+Max completed wait: 369 ticks, still waiting: 4, max open wait: 143
+ARM recovery: PASS
+Capacity checks: PASS
+Progress: PASS
+<end of output>
+Test time =   1.66 sec
+----------------------------------------------------------
+Test Passed.
+"fleetlink_python_demo" end time: Oct 05 06:17 MSK
+"fleetlink_python_demo" time elapsed: 00:00:01
+----------------------------------------------------------
+
+End testing: Oct 05 06:17 MSK
+
+Отдельный прогон S5 на той же сборке, код завершения 0
+Команда: PYTHONPATH=build python3 demo.py --scenario S5 --log-dir build/s5-logs
+
+S5: 10 machines, 100000 ticks, k=1, seed=42
+M0: loads=378, unloads=378
+M1: loads=378, unloads=378
+M2: loads=378, unloads=378
+M3: loads=378, unloads=378
+M4: loads=378, unloads=377
+M5: loads=378, unloads=377
+M6: loads=377, unloads=377
+M7: loads=377, unloads=377
+M8: loads=377, unloads=377
+M9: loads=377, unloads=377
+Channel: sent=2594239, delivered=2333683, lost=260455, duplicates=0
+Max completed wait: 452 ticks, still waiting: 10, max open wait: 112
+Journal replay: PASS (SHA-256 477a3590a836aaea689bd936f45d18a8143c7c2889c4e940fecac114e2ebdd99)
+Capacity checks: PASS
+Progress: PASS

@@ -1,0 +1,76 @@
+Исходники: 49a799e2624735677b75572138a2cbe9f30c7361
+Дата: 2026-10-05
+
+Internal ctest changing into directory: /home/default/fleetlink/build-submission-check-yl23HQ/build
+Test project /home/default/fleetlink/build-submission-check-yl23HQ/build
+      Start  1: fleetlink_tests
+ 1/12 Test  #1: fleetlink_tests ..................   Passed    8.12 sec
+      Start  2: fleetlink_demo
+ 2/12 Test  #2: fleetlink_demo ...................   Passed    0.22 sec
+      Start  3: fleetlink_demo_trace
+ 3/12 Test  #3: fleetlink_demo_trace .............   Passed    0.28 sec
+      Start  4: fleetlink_demo_s2
+ 4/12 Test  #4: fleetlink_demo_s2 ................   Passed    0.38 sec
+      Start  5: fleetlink_demo_s2_trace
+ 5/12 Test  #5: fleetlink_demo_s2_trace ..........   Passed    0.47 sec
+      Start  6: fleetlink_demo_s3
+ 6/12 Test  #6: fleetlink_demo_s3 ................   Passed    0.28 sec
+      Start  7: fleetlink_demo_s3_trace
+ 7/12 Test  #7: fleetlink_demo_s3_trace ..........   Passed    0.36 sec
+      Start  8: fleetlink_demo_s4
+ 8/12 Test  #8: fleetlink_demo_s4 ................   Passed    0.37 sec
+      Start  9: fleetlink_demo_k3
+ 9/12 Test  #9: fleetlink_demo_k3 ................   Passed    0.38 sec
+      Start 10: fleetlink_python_import
+10/12 Test #10: fleetlink_python_import ..........   Passed    0.02 sec
+      Start 11: fleetlink_python_tests
+11/12 Test #11: fleetlink_python_tests ...........   Passed    3.79 sec
+      Start 12: fleetlink_python_demo
+12/12 Test #12: fleetlink_python_demo ............   Passed    1.66 sec
+
+100% tests passed, 0 tests failed out of 12
+
+Total Test time (real) =  16.38 sec
+
+Вывод модульных тестов C++ и Python из того же прогона CTest:
+
+1/12 Testing: fleetlink_tests
+1/12 Test: fleetlink_tests
+Command: "/home/default/fleetlink/build-submission-check-yl23HQ/build/fleetlink_tests"
+Directory: /home/default/fleetlink/build-submission-check-yl23HQ/build
+"fleetlink_tests" start time: Oct 05 06:17 MSK
+Output:
+----------------------------------------------------------
+[doctest] doctest version is "2.4.12"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:    109 |    109 passed | 0 failed | 0 skipped
+[doctest] assertions: 316157 | 316157 passed | 0 failed |
+[doctest] Status: SUCCESS!
+<end of output>
+Test time =   8.12 sec
+----------------------------------------------------------
+Test Passed.
+"fleetlink_tests" end time: Oct 05 06:17 MSK
+"fleetlink_tests" time elapsed: 00:00:08
+----------------------------------------------------------
+
+11/12 Testing: fleetlink_python_tests
+11/12 Test: fleetlink_python_tests
+Command: "/home/default/fleetlink/.venv/lib/python3.12/site-packages/cmake/data/bin/cmake" "-E" "env" "PYTHONPATH=/home/default/fleetlink/build-submission-check-yl23HQ/build" "FLEETLINK_NATIVE_DEMO=/home/default/fleetlink/build-submission-check-yl23HQ/build/fleetlink_demo" "/usr/bin/python3.12" "/home/default/fleetlink/build-submission-check-yl23HQ/tests/test_python.py"
+Directory: /home/default/fleetlink/build-submission-check-yl23HQ/build
+"fleetlink_python_tests" start time: Oct 05 06:17 MSK
+Output:
+----------------------------------------------------------
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 3.743s
+
+OK
+<end of output>
+Test time =   3.79 sec
+----------------------------------------------------------
+Test Passed.
+"fleetlink_python_tests" end time: Oct 05 06:17 MSK
+"fleetlink_python_tests" time elapsed: 00:00:03
+----------------------------------------------------------

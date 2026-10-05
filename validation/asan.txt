@@ -1,0 +1,13 @@
+Исходники: 49a799e2624735677b75572138a2cbe9f30c7361
+Дата: 2026-10-05
+
+Нативные C++ тесты, Debug, FLEETLINK_SANITIZER=address, Python=OFF
+Вывод сохранён из успешного прогона этих исходников перед созданием коммитов
+Команда: ./build-asan/fleetlink_tests
+
+[doctest] doctest version is "2.4.12"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:    109 |    109 passed | 0 failed | 0 skipped
+[doctest] assertions: 315241 | 315241 passed | 0 failed |
+[doctest] Status: SUCCESS!
