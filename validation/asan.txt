@@ -2,7 +2,6 @@
 Дата: 2026-10-05
 
 Нативные C++ тесты, Debug, FLEETLINK_SANITIZER=address, Python=OFF
-Вывод сохранён из успешного прогона этих исходников перед созданием коммитов
 Команда: ./build-asan/fleetlink_tests
 
 [doctest] doctest version is "2.4.12"

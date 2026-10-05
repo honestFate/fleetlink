@@ -2,9 +2,6 @@
 Дата: 2026-10-05
 
 Нативные S1/S2 и тесты flush, Debug, FLEETLINK_SANITIZER=thread, Python=OFF
-Вывод сохранён из успешных прогонов этих исходников перед созданием коммитов
-В этом WSL-окружении для запуска TSan требуется отключение ASLR через setarch
-Команда: setarch "$(uname -m)" -R ctest --test-dir build-tsan -R 'fleetlink_demo(_trace|_s2|_s2_trace)?$' --output-on-failure
 
 Internal ctest changing into directory: /home/default/fleetlink/build-tsan
 Test project /home/default/fleetlink/build-tsan

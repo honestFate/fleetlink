@@ -1,6 +1,7 @@
-# Project notes stay local, except the required submission notes.
+# Markdown files stay local, except the submission documentation
 *.md
 !/NOTES.md
+!/README.md
 
 # Build outputs and generated traces.
 /build*/
